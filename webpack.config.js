@@ -1,7 +1,6 @@
 const path = require("path");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
-const devCerts = require("office-addin-dev-certs");
 
 const urlDev = "https://localhost:3000/";
 const urlProd = "https://globalmoo.github.io/gmoo-excel-plugin/";
@@ -11,6 +10,7 @@ module.exports = async (env, options) => {
 
   let devServerConfig = {};
   if (dev) {
+    const devCerts = require("office-addin-dev-certs");
     const httpsOptions = await devCerts.getHttpsServerOptions();
     devServerConfig = {
       devServer: {
