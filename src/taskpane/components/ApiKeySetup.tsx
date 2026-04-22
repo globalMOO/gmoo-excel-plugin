@@ -92,7 +92,7 @@ export const ApiKeySetup: React.FC<ApiKeySetupProps> = ({
 
     try {
       await onApiUrlChange(urlValue);
-      const resolvedUrl = resolveUrlForValidation(urlValue, defaultApiUrl);
+      const resolvedUrl = resolveUrlForValidation(urlValue);
       const tempClient = new GmooClient(key, resolvedUrl);
       await tempClient.getModels();
       await onApiKeyChange(key);
@@ -225,12 +225,6 @@ export const ApiKeySetup: React.FC<ApiKeySetupProps> = ({
   );
 };
 
-// Duplicates the resolution logic from useGmooClient for validation
-function resolveUrlForValidation(displayUrl: string, defaultUrl: string): string {
-  const normalized = displayUrl.trim().replace(/\/+$/, "") + "/";
-  const defaultNormalized = defaultUrl.trim().replace(/\/+$/, "") + "/";
-  if (normalized === defaultNormalized) {
-    return "https://localhost:3001/api/";
-  }
-  return normalized;
+function resolveUrlForValidation(displayUrl: string): string {
+  return displayUrl.trim().replace(/\/+$/, "") + "/";
 }

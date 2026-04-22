@@ -17,7 +17,7 @@ import type {
 
 const VALID_INPUT_TYPES = ["boolean", "category", "float", "integer"];
 const MAX_RETRIES = 3;
-const DEFAULT_BASE_URL = "https://localhost:3001/api/";
+const DEFAULT_BASE_URL = "https://app.globalmoo.com/api/";
 
 export class GmooApiError extends Error {
   constructor(
