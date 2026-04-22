@@ -2,60 +2,86 @@
 # Run once to install; re-run anytime to update the manifest.
 # No admin rights required. Code updates from GitHub are automatic.
 
-$ErrorActionPreference  = "Stop"
-$ProgressPreference     = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
+$ProgressPreference    = "SilentlyContinue"
 
 $manifestUrl  = "https://globalmoo.github.io/gmoo-excel-plugin/manifest.xml"
-$addinDir     = "$env:LOCALAPPDATA\globalMOO\vsme-addin"
-$manifestPath = "$addinDir\manifest.xml"
-
-# Stable GUID matching the add-in ID in manifest.xml — keeps re-runs idempotent
-$catalogId = "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+$installDir   = "$env:LOCALAPPDATA\GlobalMOO\ExcelAddin"
+$manifestDest = "$installDir\manifest.xml"
+$regDeveloper = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
 
 Write-Host ""
-Write-Host "Installing VSME - globalMOO Excel Add-in" -ForegroundColor Cyan
-Write-Host "-----------------------------------------"
+Write-Host "VSME - globalMOO Excel Add-in Installer" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
 
-# 1. Create local folder
-if (-not (Test-Path $addinDir)) {
-    New-Item -ItemType Directory -Path $addinDir -Force | Out-Null
+# ── 1. Kill Excel if running ──────────────────────────────────────────────────
+$excelProcs = Get-Process -Name "EXCEL" -ErrorAction SilentlyContinue
+if ($excelProcs) {
+    Write-Host "Excel is currently open. It must be closed to continue." -ForegroundColor Yellow
+    $confirm = Read-Host "Close Excel now? Unsaved work will be lost. (y/n)"
+    if ($confirm -ne "y") {
+        Write-Host "Installation cancelled. Please close Excel and re-run this script." -ForegroundColor Red
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    $excelProcs | Stop-Process -Force
+    Start-Sleep -Seconds 2
+    Write-Host "  Excel closed." -ForegroundColor Green
 }
 
-# 2. Download manifest from GitHub Pages
-Write-Host "  Downloading manifest..."
+# ── 2. Create install folder ──────────────────────────────────────────────────
+Write-Host "Creating install folder..."
+New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+Write-Host "  $installDir" -ForegroundColor Green
+
+# ── 3. Download manifest ──────────────────────────────────────────────────────
+Write-Host "Downloading manifest..."
 try {
-    Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestPath -UseBasicParsing
-    Write-Host "  Manifest saved to $manifestPath" -ForegroundColor Green
+    Invoke-WebRequest -Uri $manifestUrl -OutFile $manifestDest -UseBasicParsing
+    Write-Host "  manifest.xml downloaded." -ForegroundColor Green
 } catch {
-    Write-Host "  ERROR: Could not download manifest. Check your internet connection." -ForegroundColor Red
-    Write-Host "  $_"
+    Write-Host ""
+    Write-Host "ERROR: Could not download the manifest." -ForegroundColor Red
+    Write-Host "  Check your internet connection and try again." -ForegroundColor Red
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-# 3. Register local folder as a trusted add-in catalog
-$catalogsKey = "HKCU:\Software\Microsoft\Office\16.0\WEF\TrustedCatalogs"
-if (-not (Test-Path $catalogsKey)) {
-    New-Item -Path $catalogsKey -Force | Out-Null
+# ── 4. Read add-in ID from manifest ──────────────────────────────────────────
+Write-Host "Reading add-in ID..."
+$manifestContent = Get-Content $manifestDest -Raw
+if ($manifestContent -match '<Id>([^<]+)</Id>') {
+    $addinId = $matches[1].Trim()
+    Write-Host "  ID: $addinId" -ForegroundColor Green
+} else {
+    Write-Host "ERROR: Could not find add-in ID in manifest.xml." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
 }
-$catalogKey = "$catalogsKey\$catalogId"
-if (-not (Test-Path $catalogKey)) {
-    New-Item -Path $catalogKey -Force | Out-Null
-}
-Set-ItemProperty -Path $catalogKey -Name "Id"    -Value $catalogId
-Set-ItemProperty -Path $catalogKey -Name "Url"   -Value $addinDir
-Set-ItemProperty -Path $catalogKey -Name "Flags" -Value 1 -Type DWord
 
-Write-Host "  Trusted catalog registered." -ForegroundColor Green
+# ── 5. Register via WEF\Developer (no admin required) ────────────────────────
+Write-Host "Registering add-in..."
+if (-not (Test-Path $regDeveloper)) {
+    New-Item -Path $regDeveloper -Force | Out-Null
+}
+New-ItemProperty -Path $regDeveloper -Name $addinId -Value $manifestDest -PropertyType String -Force | Out-Null
+Write-Host "  Registered." -ForegroundColor Green
+
+# ── 6. Clean up legacy TrustedCatalogs entry if present ──────────────────────
+$oldKey = "HKCU:\Software\Microsoft\Office\16.0\WEF\TrustedCatalogs\{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
+if (Test-Path $oldKey) {
+    Remove-Item -Path $oldKey -Force | Out-Null
+    Write-Host "  Removed legacy catalog entry." -ForegroundColor Gray
+}
+
+# ── 7. Done ───────────────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "Installation complete!" -ForegroundColor Green
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Restart Microsoft Excel"
-Write-Host "  2. Home tab -> Add-ins -> More Add-ins -> Shared Folder tab"
-Write-Host "  3. Select VSME and click Add"
+Write-Host "Open Excel -- the VSME add-in will appear in your Home ribbon." -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Future code updates deploy automatically - no reinstall needed."
-Write-Host "Re-run this script only if you are told a new version requires it."
+Write-Host "Code updates deploy automatically. Re-run this script only if" -ForegroundColor Gray
+Write-Host "prompted to after a major version update." -ForegroundColor Gray
 Write-Host ""
 Read-Host "Press Enter to close"
