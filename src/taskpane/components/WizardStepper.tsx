@@ -49,6 +49,7 @@ const ALL_STEPS = [
   WizardStep.SetObjectives,
   WizardStep.Optimize,
   WizardStep.Results,
+  WizardStep.MultiSolve,
 ];
 
 export const WizardStepper: React.FC<WizardStepperProps> = ({ currentStep }) => {

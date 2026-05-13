@@ -12,6 +12,7 @@ const FALLBACK_KEYS: (keyof WorkbookState)[] = [
   "objectiveId",
   "wizardStep",
   "apiKeyHint",
+  "activeConnectionId",
 ];
 
 export async function saveWorkbookState(state: WorkbookState): Promise<void> {

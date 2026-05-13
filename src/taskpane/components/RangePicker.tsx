@@ -64,9 +64,9 @@ export const RangePicker: React.FC<RangePickerProps> = ({
           appearance="subtle"
           onClick={handlePick}
           disabled={isPicking}
-          title="Select range in Excel"
+          title="Use the cells you currently have selected in Excel"
         >
-          {isPicking ? "Click cells..." : "Pick"}
+          {isPicking ? "Reading..." : "Use selection"}
         </Button>
       </div>
     </div>

@@ -16,9 +16,10 @@ import {
   TableBody,
   TableCell,
 } from "@fluentui/react-components";
+import { CursorClick20Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { EvalConfig } from "../services/excelService";
-import { evaluateCase } from "../services/excelService";
+import { evaluateCase, readSelectedRangeWithValues } from "../services/excelService";
 import { ObjectiveType } from "../types/gmoo";
 
 const useStyles = makeStyles({
@@ -53,6 +54,32 @@ const OBJECTIVE_TYPE_OPTIONS = [
 ];
 
 const NO_TARGET_TYPES = new Set([ObjectiveType.Minimize, ObjectiveType.Maximize]);
+
+/** Parse a string cell into an ObjectiveType, or null if unrecognized. */
+function parseObjectiveType(raw: unknown): ObjectiveType | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  if (s === "value" || s === "v" || s === "equal" || s === "eq" || s === "=")
+    return ObjectiveType.Value;
+  if (s === "percent" || s === "pct" || s === "%") return ObjectiveType.Percent;
+  if (s === "lessthan" || s === "less than" || s === "lt" || s === "<")
+    return ObjectiveType.LessThan;
+  if (s === "lessthanequal" || s === "less than equal" || s === "lte" || s === "<=")
+    return ObjectiveType.LessThanEqual;
+  if (s === "greaterthan" || s === "greater than" || s === "gt" || s === ">")
+    return ObjectiveType.GreaterThan;
+  if (s === "greaterthanequal" || s === "greater than equal" || s === "gte" || s === ">=")
+    return ObjectiveType.GreaterThanEqual;
+  if (s === "minimize" || s === "min") return ObjectiveType.Minimize;
+  if (s === "maximize" || s === "max") return ObjectiveType.Maximize;
+  return null;
+}
+
+function cellToString(raw: unknown): string {
+  if (raw === null || raw === undefined) return "";
+  return String(raw);
+}
 
 export interface ObjectiveRowData {
   type: ObjectiveType;
@@ -111,6 +138,79 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
     );
   };
 
+  /**
+   * Populate the objectives table from the user's current Excel selection.
+   *
+   * Column layouts, inferred from the shape of the range:
+   *   1 col  → Target
+   *   2 cols → Type | Target   (if col-1 parses as a type for any row)
+   *            else Target | MinBound
+   *   3 cols → Type | Target | (symmetric ± Bound)  if col-1 is a type
+   *            else Target | MinBound | MaxBound
+   *   4 cols → Type | Target | MinBound | MaxBound
+   *
+   * Row count must match `outcomeNames.length`. Missing/unparseable fields
+   * leave the existing value untouched.
+   */
+  const loadObjectivesFromSelection = async () => {
+    setError(null);
+    try {
+      const { values } = await readSelectedRangeWithValues();
+      // Trim fully-blank trailing rows
+      const rows = values.filter(
+        (r) => r && r.some((c) => c !== null && c !== undefined && String(c).trim() !== "")
+      );
+      if (rows.length === 0) {
+        setError("Selected range is empty.");
+        return;
+      }
+      if (rows.length !== outcomeNames.length) {
+        setError(
+          `Selection has ${rows.length} row(s) but there are ${outcomeNames.length} outcome(s). Select exactly one row per outcome.`
+        );
+        return;
+      }
+
+      const nCols = Math.max(...rows.map((r) => r.length));
+      // Does the first column parse as a type for at least one row?
+      const firstColIsType = rows.some((r) => parseObjectiveType(r[0]) !== null);
+
+      const next = objectives.map((obj, i) => {
+        const row = rows[i];
+        const updated: ObjectiveRowData = { ...obj };
+
+        if (nCols === 1) {
+          updated.target = cellToString(row[0]) || obj.target;
+        } else if (firstColIsType) {
+          const t = parseObjectiveType(row[0]);
+          if (t) updated.type = t;
+          if (nCols >= 2) updated.target = cellToString(row[1]) || obj.target;
+          if (nCols === 3) {
+            // Single "± bound" column → apply to both min and max (symmetric)
+            const b = cellToString(row[2]);
+            if (b) {
+              const absB = String(Math.abs(parseFloat(b) || 0));
+              updated.minBound = `-${absB}`;
+              updated.maxBound = absB;
+            }
+          } else if (nCols >= 4) {
+            if (cellToString(row[2])) updated.minBound = cellToString(row[2]);
+            if (cellToString(row[3])) updated.maxBound = cellToString(row[3]);
+          }
+        } else {
+          // No type column — columns are Target [, Min [, Max]]
+          updated.target = cellToString(row[0]) || obj.target;
+          if (nCols >= 2 && cellToString(row[1])) updated.minBound = cellToString(row[1]);
+          if (nCols >= 3 && cellToString(row[2])) updated.maxBound = cellToString(row[2]);
+        }
+        return updated;
+      });
+      setObjectives(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read selected range.");
+    }
+  };
+
   const handleSubmit = async () => {
     if (!client) return;
 
@@ -154,9 +254,20 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
 
   return (
     <div className={styles.container}>
-      <Text weight="semibold" size={400}>
-        Set Objectives
-      </Text>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+        <Text weight="semibold" size={400}>
+          Set Objectives
+        </Text>
+        <Button
+          icon={<CursorClick20Regular />}
+          size="small"
+          appearance="subtle"
+          onClick={loadObjectivesFromSelection}
+          title="Populate Type / Target / Min / Max from the currently-selected cells (1–4 columns; any sheet or workbook). One row per outcome."
+        >
+          Load from selection
+        </Button>
+      </div>
       <Text size={200}>
         Define optimization targets for each outcome.
       </Text>

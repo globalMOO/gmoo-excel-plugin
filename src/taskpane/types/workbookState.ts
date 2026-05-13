@@ -8,6 +8,8 @@ export interface InputVariable {
 
 export interface WorkbookState {
   apiKeyHint: string;
+  /** ID of the Connection (from connectionsService) selected for this workbook. */
+  activeConnectionId: string | null;
   modelId: number | null;
   modelName: string;
   projectId: number | null;
@@ -25,6 +27,7 @@ export interface WorkbookState {
 
 export const DEFAULT_WORKBOOK_STATE: WorkbookState = {
   apiKeyHint: "",
+  activeConnectionId: null,
   modelId: null,
   modelName: "",
   projectId: null,
@@ -47,6 +50,7 @@ export enum WizardStep {
   SetObjectives = 3,
   Optimize = 4,
   Results = 5,
+  MultiSolve = 6,
 }
 
 export const WIZARD_STEP_LABELS: Record<WizardStep, string> = {
@@ -56,4 +60,5 @@ export const WIZARD_STEP_LABELS: Record<WizardStep, string> = {
   [WizardStep.SetObjectives]: "Set Objectives",
   [WizardStep.Optimize]: "Optimize",
   [WizardStep.Results]: "Results",
+  [WizardStep.MultiSolve]: "Multi-Solve",
 };

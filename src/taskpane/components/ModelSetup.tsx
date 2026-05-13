@@ -20,11 +20,11 @@ import {
   Caption1,
   ProgressBar,
 } from "@fluentui/react-components";
-import { Add20Regular, Delete20Regular, BookTemplate20Regular, ChevronDown20Regular, ChevronUp20Regular } from "@fluentui/react-icons";
+import { Add20Regular, Delete20Regular, BookTemplate20Regular, ChevronDown20Regular, ChevronUp20Regular, CursorClick20Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { InputVariable } from "../types/workbookState";
 import type { EvalConfig } from "../services/excelService";
-import { createTemplateSheet, createExampleSheets } from "../services/excelService";
+import { createTemplateSheet, createExampleSheets, readSelectedRangeWithValues } from "../services/excelService";
 import { InputType } from "../types/gmoo";
 import { EXAMPLES, isMultiSheetExample, type Example } from "../examples";
 
@@ -175,6 +175,64 @@ const COMPLEXITY_COLORS: Record<string, string> = {
   advanced: "#D13438",
 };
 
+/** Parse a string cell value to a canonical InputType, or return null if unrecognized. */
+function parseInputType(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  if (s === "float" || s === "f" || s === "real" || s === "number" || s === "continuous")
+    return InputType.Float;
+  if (s === "integer" || s === "int" || s === "i") return InputType.Integer;
+  if (s === "boolean" || s === "bool" || s === "b") return InputType.Boolean;
+  if (s === "category" || s === "categorical" || s === "cat" || s === "c")
+    return InputType.Category;
+  return null;
+}
+
+/**
+ * Parse a 2-D values array into VariableRow[]. Accepts 1-4 columns per row:
+ *   [name], [name, type], [name, type, min], [name, type, min, max].
+ * Blank rows are skipped. Unspecified type/min/max get defaults.
+ */
+function parseVariablesFromRange(values: unknown[][]): VariableRow[] {
+  const rows: VariableRow[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i] ?? [];
+    const nameCell = row[0];
+    const name =
+      nameCell === null || nameCell === undefined ? "" : String(nameCell).trim();
+    // Skip fully-blank rows
+    const hasAny = row.some(
+      (c) => c !== null && c !== undefined && String(c).trim() !== ""
+    );
+    if (!hasAny) continue;
+    const parsedType = parseInputType(row[1]);
+    const minRaw = row[2];
+    const maxRaw = row[3];
+    rows.push({
+      name,
+      type: parsedType ?? InputType.Float,
+      min: minRaw === null || minRaw === undefined || minRaw === "" ? "0" : String(minRaw),
+      max: maxRaw === null || maxRaw === undefined || maxRaw === "" ? "1" : String(maxRaw),
+    });
+  }
+  return rows;
+}
+
+/** Parse a 2-D values array into outcome names (first column, blank rows skipped). */
+function parseOutcomesFromRange(values: unknown[][]): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i] ?? [];
+    const cell = row[0];
+    if (cell === null || cell === undefined) continue;
+    const s = String(cell).trim();
+    if (!s) continue;
+    names.push(s);
+  }
+  return names;
+}
+
 export const ModelSetup: React.FC<ModelSetupProps> = ({
   client,
   onComplete,
@@ -304,6 +362,40 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
     setOutcomeNames([...outcomeNames, ""]);
   };
 
+  const loadVariablesFromSelection = async () => {
+    setError(null);
+    try {
+      const { values } = await readSelectedRangeWithValues();
+      const parsed = parseVariablesFromRange(values);
+      if (parsed.length === 0) {
+        setError("No non-empty rows found in the selected range.");
+        return;
+      }
+      if (parsed.length < 2) {
+        setError("At least 2 variables are required; selected range only contains 1 non-empty row.");
+        return;
+      }
+      setVariables(parsed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read selected range.");
+    }
+  };
+
+  const loadOutcomesFromSelection = async () => {
+    setError(null);
+    try {
+      const { values } = await readSelectedRangeWithValues();
+      const parsed = parseOutcomesFromRange(values);
+      if (parsed.length === 0) {
+        setError("No non-empty outcome names found in the selected range.");
+        return;
+      }
+      setOutcomeNames(parsed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read selected range.");
+    }
+  };
+
   const removeOutcome = (index: number) => {
     if (outcomeNames.length <= 1) return;
     setOutcomeNames(outcomeNames.filter((_, i) => i !== index));
@@ -314,18 +406,16 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
     if (modelName.trim().length < 4) return "Model name must be at least 4 characters.";
     if (variables.length < 2) return "At least 2 input variables are required.";
     for (let i = 0; i < variables.length; i++) {
-      if (!variables[i].name.trim()) return `Variable ${i + 1} needs a name.`;
+      // Empty names auto-fill to "Var N" / "Outcome N" at submit time, no error here.
       const t = variables[i].type;
       const minVal = parseFloat(variables[i].min);
       const maxVal = parseFloat(variables[i].max);
       if (t !== "boolean" && t !== "category" && (isNaN(minVal) || isNaN(maxVal) || minVal >= maxVal)) {
-        return `Variable "${variables[i].name}": min must be less than max.`;
+        const displayName = variables[i].name.trim() || `Var ${i + 1}`;
+        return `Variable "${displayName}": min must be less than max.`;
       }
     }
     if (outcomeNames.length === 0) return "At least one outcome is required.";
-    for (let i = 0; i < outcomeNames.length; i++) {
-      if (!outcomeNames[i].trim()) return `Outcome ${i + 1} needs a name.`;
-    }
     return null;
   };
 
@@ -347,7 +437,12 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       const desc = description.trim() || `VSME model: ${modelName.trim()}`;
       const paddedDesc = desc.length < 8 ? desc.padEnd(8, " ") : desc;
       const model = await client.createModel(modelName.trim(), paddedDesc);
-      const inputVars = toInputVariables(variables);
+      // Auto-fill blank names with defaults before sending to the API.
+      const filledVariables = variables.map((v, i) => ({
+        ...v,
+        name: v.name.trim() || `Var ${i + 1}`,
+      }));
+      const inputVars = toInputVariables(filledVariables);
       const project = await client.createProject(
         model.id,
         modelName.trim(),
@@ -358,12 +453,16 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
         inputVars.flatMap((v) => v.categories ?? [])
       );
 
+      const filledOutcomeNames = outcomeNames.map(
+        (n, i) => n.trim() || `Outcome ${i + 1}`
+      );
+
       onComplete({
         modelId: model.id,
         projectId: project.id,
         modelName: modelName.trim(),
         inputVariables: inputVars,
-        outcomeNames: outcomeNames.map((n) => n.trim()),
+        outcomeNames: filledOutcomeNames,
         inputCases: project.inputCases,
         selectedExample: selectedExample ?? undefined,
       });
@@ -473,9 +572,20 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       </div>
 
       <div className={styles.section}>
-        <Text weight="semibold" size={300}>
-          Input Variables
-        </Text>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+          <Text weight="semibold" size={300}>
+            Input Variables
+          </Text>
+          <Button
+            icon={<CursorClick20Regular />}
+            size="small"
+            appearance="subtle"
+            onClick={loadVariablesFromSelection}
+            title="Populate Name / Type / Min / Max from the currently-selected cells (1–4 columns; any sheet or workbook)."
+          >
+            Load from selection
+          </Button>
+        </div>
         <Table size="extra-small">
           <TableHeader>
             <TableRow>
@@ -556,9 +666,20 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       </div>
 
       <div className={styles.section}>
-        <Text weight="semibold" size={300}>
-          Outcomes
-        </Text>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+          <Text weight="semibold" size={300}>
+            Outcomes
+          </Text>
+          <Button
+            icon={<CursorClick20Regular />}
+            size="small"
+            appearance="subtle"
+            onClick={loadOutcomesFromSelection}
+            title="Populate outcome names from the currently-selected cells (single column; any sheet or workbook)."
+          >
+            Load from selection
+          </Button>
+        </div>
         {outcomeNames.map((name, i) => (
           <div key={i} className={styles.outcomeRow}>
             <Input
