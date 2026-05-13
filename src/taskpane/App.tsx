@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { BUILD_TIME } from "./buildInfo";
 import {
   FluentProvider,
@@ -10,13 +10,14 @@ import {
   Button,
 } from "@fluentui/react-components";
 import { WizardStepper } from "./components/WizardStepper";
-import { ApiKeySetup } from "./components/ApiKeySetup";
+import { ConnectionSetup } from "./components/ConnectionSetup";
 import { ModelSetup } from "./components/ModelSetup";
 import { CaseEvaluation } from "./components/CaseEvaluation";
 import { ObjectiveSetup } from "./components/ObjectiveSetup";
 import { OptimizationRunner } from "./components/OptimizationRunner";
 import { ResultsSummary } from "./components/ResultsSummary";
-import { useApiKey } from "./hooks/useApiKey";
+import { MultiSolvePanel } from "./components/MultiSolvePanel";
+import { useConnections } from "./hooks/useConnections";
 import { useGmooClient } from "./hooks/useGmooClient";
 import { useWorkbookState } from "./hooks/useWorkbookState";
 import { useOptimization } from "./hooks/useOptimization";
@@ -26,6 +27,13 @@ import { loadStateSheet } from "./services/excelService";
 import type { InputVariable } from "./types/workbookState";
 import type { ObjectiveRowData } from "./components/ObjectiveSetup";
 import type { Example } from "./examples";
+import {
+  parseActivationFromUrl,
+  exchangeActivation,
+  applyActivation,
+  clearActivationFromUrl,
+  ActivationError,
+} from "./services/activationService";
 
 const useStyles = makeStyles({
   root: {
@@ -61,11 +69,96 @@ const useStyles = makeStyles({
   },
 });
 
+type Banner = { intent: "success" | "error" | "info"; title: string; body?: string } | null;
+
 const App: React.FC = () => {
   const styles = useStyles();
-  const { apiKey, apiUrl, setApiKey, setApiUrl, isLoading: isLoadingKey, DEFAULT_API_URL } = useApiKey();
-  const client = useGmooClient(apiKey, apiUrl);
   const { state, isLoaded: isStateLoaded, updateState, resetState } = useWorkbookState();
+
+  const setActiveConnectionIdInState = useCallback(
+    async (id: string | null) => {
+      await updateState({ activeConnectionId: id });
+    },
+    [updateState]
+  );
+
+  const {
+    connections,
+    activeConnection,
+    isLoading: isLoadingConnections,
+    setActive,
+    add,
+    update,
+    remove,
+    refresh: refreshConnections,
+  } = useConnections({
+    activeConnectionId: state.activeConnectionId,
+    setActiveConnectionId: setActiveConnectionIdInState,
+  });
+
+  const client = useGmooClient(activeConnection);
+
+  // Activation flow: parse URL on first launch and run the exchange. While the
+  // exchange is in flight we render a full-pane spinner. Errors fall through
+  // to the wizard with a banner. Success applies the connection, sets it
+  // active, and proceeds.
+  const [activationStatus, setActivationStatus] = useState<
+    | { kind: "idle" }
+    | { kind: "exchanging"; hostname: string }
+    | { kind: "done" }
+  >(() => {
+    const params = parseActivationFromUrl();
+    if (!params) return { kind: "done" };
+    let host = params.srv;
+    try {
+      host = new URL(params.srv).hostname;
+    } catch {
+      // keep raw srv
+    }
+    return { kind: "exchanging", hostname: host };
+  });
+  const [banner, setBanner] = useState<Banner>(null);
+
+  useEffect(() => {
+    if (activationStatus.kind !== "exchanging") return;
+    const params = parseActivationFromUrl();
+    if (!params) {
+      setActivationStatus({ kind: "done" });
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await exchangeActivation(params.srv, params.token);
+        const conn = await applyActivation(result, params.label);
+        await refreshConnections();
+        await setActiveConnectionIdInState(conn.id);
+        if (!cancelled) {
+          setBanner({
+            intent: "success",
+            title: "Connected",
+            body: `Activated "${conn.label}".`,
+          });
+        }
+      } catch (err) {
+        if (!cancelled) {
+          const msg =
+            err instanceof ActivationError
+              ? err.message
+              : err instanceof Error
+              ? err.message
+              : "Activation failed.";
+          setBanner({ intent: "error", title: "Activation failed", body: msg });
+        }
+      } finally {
+        clearActivationFromUrl();
+        if (!cancelled) setActivationStatus({ kind: "done" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activationStatus.kind, refreshConnections, setActiveConnectionIdInState]);
 
   // Keep evalConfig in React state (not persisted — re-created on template step)
   const [evalConfig, setEvalConfig] = React.useState<EvalConfig | null>(null);
@@ -94,11 +187,21 @@ const App: React.FC = () => {
     [updateState]
   );
 
-  if (isLoadingKey || !isStateLoaded) {
+  if (isLoadingConnections || !isStateLoaded) {
     return (
       <FluentProvider theme={webLightTheme}>
         <div className={styles.loading}>
           <Spinner label="Loading..." />
+        </div>
+      </FluentProvider>
+    );
+  }
+
+  if (activationStatus.kind === "exchanging") {
+    return (
+      <FluentProvider theme={webLightTheme}>
+        <div className={styles.loading}>
+          <Spinner label={`Connecting to ${activationStatus.hostname}…`} />
         </div>
       </FluentProvider>
     );
@@ -110,16 +213,25 @@ const App: React.FC = () => {
     switch (currentStep) {
       case WizardStep.Connect:
         return (
-          <ApiKeySetup
-            apiKey={apiKey}
-            apiUrl={apiUrl}
-            defaultApiUrl={DEFAULT_API_URL}
-            onApiKeyChange={async (key) => {
-              await setApiKey(key);
-              updateState({ apiKeyHint: key ? `...${key.slice(-4)}` : "" });
+          <ConnectionSetup
+            connections={connections}
+            activeConnection={activeConnection}
+            onSetActive={setActive}
+            onAdd={add}
+            onUpdate={update}
+            onDelete={remove}
+            onNext={() => {
+              if (activeConnection) {
+                updateState({
+                  apiKeyHint: activeConnection.apiKey
+                    ? `...${activeConnection.apiKey.slice(-4)}`
+                    : "",
+                });
+              }
+              goToStep(WizardStep.DefineModel);
             }}
-            onApiUrlChange={setApiUrl}
-            onNext={() => goToStep(WizardStep.DefineModel)}
+            banner={banner}
+            onDismissBanner={() => setBanner(null)}
           />
         );
 
@@ -235,6 +347,20 @@ const App: React.FC = () => {
               await resetState();
               goToStep(WizardStep.Connect);
             }}
+            onMultiSolve={() => goToStep(WizardStep.MultiSolve)}
+          />
+        );
+
+      case WizardStep.MultiSolve:
+        return (
+          <MultiSolvePanel
+            client={client}
+            trialId={state.trialId}
+            evalConfig={evalConfig}
+            inputVariables={state.inputVariables}
+            outcomeNames={state.outcomeNames}
+            objectiveRows={savedObjectives}
+            onBack={() => goToStep(WizardStep.Results)}
           />
         );
 

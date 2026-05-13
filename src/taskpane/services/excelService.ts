@@ -257,6 +257,24 @@ export async function readRangeValues(address: string): Promise<unknown[][]> {
   });
 }
 
+/**
+ * Read the currently-selected range in Excel, returning both the absolute
+ * address and the 2-D values array. Used by "Load from Excel selection"
+ * buttons to pull configuration values out of any sheet — including a
+ * different workbook via linked references.
+ */
+export async function readSelectedRangeWithValues(): Promise<{
+  address: string;
+  values: unknown[][];
+}> {
+  return Excel.run(async (context) => {
+    const range = context.workbook.getSelectedRange();
+    range.load(["address", "values"]);
+    await context.sync();
+    return { address: range.address, values: range.values };
+  });
+}
+
 // --- Non-contiguous cell operations ---
 
 function parseAddress(fullAddress: string): { sheet: string; cell: string } {
@@ -570,4 +588,125 @@ export async function saveStateSheet(data: VsmeStateData): Promise<void> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// --- Multi-Solve solution persistence ---
+
+const MULTI_SOLVE_SHEET = "VSME Multi-Solve";
+
+export interface MultiSolveRunRow {
+  runIndex: number;        // 0-based
+  status: "unique" | "failed";
+  solutionIdx: number | null;   // 1-based solution index when converged; null on failure
+  distanceToNearest: number | null; // normalized Euclidean distance to the nearest already-collected solution (diagnostic only; null for the first one)
+  satisfied: boolean;
+  l1Norm: number | null;        // null on failure
+  iterations: number | null;    // null on failure
+  initialInputs: number[];
+  finalInputs: number[] | null;
+  outputs: number[] | null;
+  note?: string;                // optional diagnostic message (e.g. error reason for failed runs)
+}
+
+/**
+ * Appends a per-run diagnostic row to the "VSME Multi-Solve" sheet. Every
+ * random-start run writes one row — unique, duplicate, and failed alike —
+ * so the user can diagnose why the optimizer does or doesn't find distinct
+ * solutions. `resetSheet=true` wipes any existing sheet (called on the first
+ * row of a new Multi-Solve run).
+ */
+export async function writeMultiSolveRun(
+  row: MultiSolveRunRow,
+  inputVarNames: string[],
+  outcomeNames: string[],
+  resetSheet: boolean
+): Promise<void> {
+  return Excel.run(async (context) => {
+    const sheets = context.workbook.worksheets;
+
+    const existing = sheets.getItemOrNullObject(MULTI_SOLVE_SHEET);
+    existing.load("name");
+    await context.sync();
+
+    let sheet: Excel.Worksheet;
+    const headerRow = [
+      "Run",
+      "Status",
+      "Solution #",
+      "Dist. to nearest",
+      "Satisfied",
+      "L1 Norm",
+      "Iter",
+      ...inputVarNames.map((n) => `init: ${n}`),
+      ...inputVarNames.map((n) => `final: ${n}`),
+      ...outcomeNames.map((n) => `out: ${n}`),
+      "Note",
+    ];
+
+    const wasNull = existing.isNullObject;
+    if (wasNull) {
+      sheet = sheets.add(MULTI_SOLVE_SHEET);
+      writeHeaderRow(sheet, headerRow);
+    } else if (resetSheet) {
+      existing.delete();
+      await context.sync();
+      sheet = sheets.add(MULTI_SOLVE_SHEET);
+      writeHeaderRow(sheet, headerRow);
+    } else {
+      sheet = existing;
+    }
+
+    let nextRow = 2;
+    if (!resetSheet && !wasNull) {
+      const used = sheet.getUsedRange(true);
+      used.load("rowCount");
+      await context.sync();
+      nextRow = (used.rowCount || 1) + 1;
+    }
+
+    const nInputs = inputVarNames.length;
+    const nOutputs = outcomeNames.length;
+    // Pad arrays so every row has the same number of columns — Excel won't
+    // accept a jagged range assignment.
+    const padded = (arr: number[] | null, n: number): (number | string)[] =>
+      arr ? arr.slice(0, n) : new Array(n).fill("");
+
+    const rowValues: (string | number | boolean)[] = [
+      row.runIndex + 1,
+      row.status,
+      row.solutionIdx ?? "",
+      row.distanceToNearest !== null ? row.distanceToNearest : "",
+      row.status === "failed" ? "" : (row.satisfied ? "Yes" : "No"),
+      row.l1Norm !== null ? row.l1Norm : "",
+      row.iterations !== null ? row.iterations : "",
+      ...padded(row.initialInputs, nInputs),
+      ...padded(row.finalInputs, nInputs),
+      ...padded(row.outputs, nOutputs),
+      row.note ?? "",
+    ];
+
+    const endColLetter = columnLetter(rowValues.length - 1);
+    const targetRange = sheet.getRange(`A${nextRow}:${endColLetter}${nextRow}`);
+    targetRange.values = [rowValues];
+
+    await context.sync();
+  });
+}
+
+function writeHeaderRow(sheet: Excel.Worksheet, headers: string[]): void {
+  const endCol = columnLetter(headers.length - 1);
+  const headerRange = sheet.getRange(`A1:${endCol}1`);
+  headerRange.values = [headers];
+  headerRange.format.font.bold = true;
+  headerRange.format.fill.color = "#D9E1F2";
+}
+
+function columnLetter(zeroBasedIndex: number): string {
+  let n = zeroBasedIndex;
+  let s = "";
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
 }

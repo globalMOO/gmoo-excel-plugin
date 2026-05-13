@@ -16,7 +16,11 @@ import {
   TableCell,
   Badge,
 } from "@fluentui/react-components";
-import { ChartMultiple20Regular, ArrowReset20Regular } from "@fluentui/react-icons";
+import {
+  ChartMultiple20Regular,
+  ArrowReset20Regular,
+  Flash20Regular,
+} from "@fluentui/react-icons";
 import type { Inverse } from "../types/gmoo";
 import { getStopReason, getStopReasonLabel, StopReason, filteredL1Norm, isTargetBasedType } from "../types/gmoo";
 import { createResultsCharts } from "../services/excelChartService";
@@ -40,8 +44,12 @@ const useStyles = makeStyles({
   },
   buttonRow: {
     display: "flex",
+    flexDirection: "column",
     gap: "8px",
     marginTop: "12px",
+  },
+  fullWidthButton: {
+    justifyContent: "flex-start",
   },
 });
 
@@ -50,6 +58,7 @@ interface ResultsSummaryProps {
   inputVariableNames: string[];
   outcomeNames: string[];
   onStartOver: () => void;
+  onMultiSolve: () => void;
 }
 
 export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
@@ -57,6 +66,7 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
   inputVariableNames,
   outcomeNames,
   onStartOver,
+  onMultiSolve,
 }) => {
   const styles = useStyles();
   const [isCreatingCharts, setIsCreatingCharts] = useState(false);
@@ -211,6 +221,7 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
       {/* Actions */}
       <div className={styles.buttonRow}>
         <Button
+          className={styles.fullWidthButton}
           icon={<ChartMultiple20Regular />}
           appearance="primary"
           onClick={handleCreateCharts}
@@ -225,6 +236,15 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
           )}
         </Button>
         <Button
+          className={styles.fullWidthButton}
+          icon={<Flash20Regular />}
+          appearance="secondary"
+          onClick={onMultiSolve}
+        >
+          Multi-Solve
+        </Button>
+        <Button
+          className={styles.fullWidthButton}
           icon={<ArrowReset20Regular />}
           appearance="secondary"
           onClick={onStartOver}
