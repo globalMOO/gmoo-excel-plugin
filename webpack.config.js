@@ -86,6 +86,11 @@ module.exports = async (env, options) => {
               return content.toString().replace(/https:\/\/localhost:3000\//g, url);
             },
           },
+          {
+            from: "install.ps1",
+            to: "install.ps1",
+            noErrorOnMissing: true,
+          },
         ],
       }),
     ],
