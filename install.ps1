@@ -16,12 +16,17 @@
 #   Non-interactive with pre-supplied values:
 #     $args = @{ApiUrl='https://10.0.0.5/api/'; CertFile='C:\acme-ca.crt'; NoInteractive=$true}
 #     & ([scriptblock]::Create((irm https://globalmoo.github.io/gmoo-excel-plugin/install.ps1))) @args
+#
+#   Trust the API server cert only (skip the install steps — used by the
+#   in-app "Test connection" hand-off so the user isn't booted from Excel):
+#     & ([scriptblock]::Create((irm https://globalmoo.github.io/gmoo-excel-plugin/install.ps1))) -ApiUrl 'https://10.0.0.5/api/' -CertOnly
 
 [CmdletBinding()]
 param(
     [string]$ApiUrl,
     [string]$CertFile,
-    [switch]$NoInteractive
+    [switch]$NoInteractive,
+    [switch]$CertOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -257,13 +262,21 @@ if ($probe.Trusted) {
         Write-Host "  $($probe2.ErrorMsg)" -ForegroundColor Gray
         Write-Host "  The cert was imported, but Windows validation still fails." -ForegroundColor Yellow
         Write-Host "  This usually means the server cert has another issue (expired, hostname mismatch, missing intermediate)." -ForegroundColor Yellow
-        if (-not $NoInteractive) {
+        if (-not $NoInteractive -and -not $CertOnly) {
             $cont = Read-Host "Continue with install anyway? (y/n)"
             if ($cont -ne 'y') { exit 1 }
         }
     }
 }
 Write-Host ""
+
+# ── Cert-only mode: skip the install steps and exit ─────────────────────────
+if ($CertOnly) {
+    Write-Host "Cert-only mode: skipping add-in install steps." -ForegroundColor Cyan
+    Write-Host "Done. Click Retry in the Excel task pane." -ForegroundColor Green
+    Write-Host ""
+    exit 0
+}
 
 # ── 3. Kill Excel if running ──────────────────────────────────────────────────
 $excelProcs = Get-Process -Name "EXCEL" -ErrorAction SilentlyContinue

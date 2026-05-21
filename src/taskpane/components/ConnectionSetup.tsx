@@ -27,6 +27,8 @@ import {
   Edit20Regular,
   Delete20Regular,
   CheckmarkCircle20Filled,
+  Copy20Regular,
+  ArrowClockwise20Regular,
 } from "@fluentui/react-icons";
 import { GmooClient, GmooApiError } from "../services/gmooApi";
 import type { Connection, NewConnectionInput } from "../types/connection";
@@ -94,6 +96,27 @@ const useStyles = makeStyles({
   hint: {
     color: tokens.colorNeutralForeground3,
   },
+  certBlock: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+    marginTop: "8px",
+  },
+  certCommand: {
+    fontFamily: "Consolas, 'Courier New', monospace",
+    fontSize: "11px",
+    backgroundColor: tokens.colorNeutralBackground3,
+    padding: "8px",
+    borderRadius: tokens.borderRadiusMedium,
+    overflowX: "auto",
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-all",
+    margin: 0,
+  },
+  certActions: {
+    display: "flex",
+    gap: "8px",
+  },
 });
 
 export interface ConnectionSetupProps {
@@ -125,27 +148,85 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
   const [validateState, setValidateState] = useState<{
     inFlight: boolean;
     error: string | null;
+    failureKind: "api" | "network" | null;
+    lastTested: Connection | null;
     validatedId: string | null;
-  }>({ inFlight: false, error: null, validatedId: null });
+  }>({ inFlight: false, error: null, failureKind: null, lastTested: null, validatedId: null });
+  const [copied, setCopied] = useState(false);
 
   const validate = async (conn: Connection) => {
-    setValidateState({ inFlight: true, error: null, validatedId: null });
+    setValidateState({
+      inFlight: true,
+      error: null,
+      failureKind: null,
+      lastTested: conn,
+      validatedId: null,
+    });
+    setCopied(false);
     try {
       const host = conn.apiUrl.replace(/\/+$/, "").replace(/\/api$/i, "");
       const base = host + "/api/";
       const tempClient = new GmooClient(conn.apiKey, base);
       await tempClient.getModels();
-      setValidateState({ inFlight: false, error: null, validatedId: conn.id });
+      setValidateState({
+        inFlight: false,
+        error: null,
+        failureKind: null,
+        lastTested: conn,
+        validatedId: conn.id,
+      });
     } catch (err) {
+      // GmooApiError = round-trip succeeded, server returned a status code.
+      // Anything else (typically TypeError "Failed to fetch") = round-trip
+      // never completed: cert untrusted, CORS rejected, DNS, network, etc.
+      // The fetch API hides the underlying cause, so we surface a hand-off
+      // that runs the cert-trust installer — which gives useful diagnostics
+      // either way (cert imported, host unreachable, etc.).
       let msg: string;
+      let failureKind: "api" | "network";
       if (err instanceof GmooApiError && err.status === 401) {
         msg = "Invalid API key.";
+        failureKind = "api";
       } else if (err instanceof GmooApiError) {
         msg = `API error (${err.status}): ${err.apiError?.message ?? "Unknown error"}`;
+        failureKind = "api";
       } else {
-        msg = `Connection failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+        msg = err instanceof Error ? err.message : "Unknown error";
+        failureKind = "network";
       }
-      setValidateState({ inFlight: false, error: msg, validatedId: null });
+      setValidateState({
+        inFlight: false,
+        error: msg,
+        failureKind,
+        lastTested: conn,
+        validatedId: null,
+      });
+    }
+  };
+
+  const buildCertTrustCommand = (apiUrl: string): string => {
+    // Single-quote the URL so PowerShell takes it literally. We sanitize any
+    // embedded single quotes by doubling them (PS string-escape convention).
+    const safeUrl = apiUrl.replace(/'/g, "''");
+    return `& ([scriptblock]::Create((irm https://globalmoo.github.io/gmoo-excel-plugin/install.ps1))) -ApiUrl '${safeUrl}' -CertOnly`;
+  };
+
+  const copyCertTrustCommand = async () => {
+    if (!validateState.lastTested) return;
+    const cmd = buildCertTrustCommand(validateState.lastTested.apiUrl);
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      // Clipboard API can fail in restricted contexts — fall back to a manual
+      // textarea select. Silent failure is fine; the command is visible.
+    }
+  };
+
+  const retryValidate = () => {
+    if (validateState.lastTested) {
+      void validate(validateState.lastTested);
     }
   };
 
@@ -214,11 +295,58 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
         </>
       )}
 
-      {validateState.error && (
+      {validateState.error && validateState.failureKind === "api" && (
         <MessageBar intent="error">
           <MessageBarBody>
             <MessageBarTitle>Test failed</MessageBarTitle>
             {validateState.error}
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
+      {validateState.error && validateState.failureKind === "network" && validateState.lastTested && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            <MessageBarTitle>
+              Couldn't reach{" "}
+              {(() => {
+                try {
+                  return new URL(validateState.lastTested.apiUrl).hostname;
+                } catch {
+                  return validateState.lastTested.apiUrl;
+                }
+              })()}
+            </MessageBarTitle>
+            <div className={styles.certBlock}>
+              <Text size={200}>
+                This usually means the server's TLS certificate isn't trusted by
+                Windows (also fires on DNS / network / CORS failures). Open
+                PowerShell on this machine and run:
+              </Text>
+              <pre className={styles.certCommand}>
+                {buildCertTrustCommand(validateState.lastTested.apiUrl)}
+              </pre>
+              <div className={styles.certActions}>
+                <Button
+                  size="small"
+                  icon={<Copy20Regular />}
+                  onClick={copyCertTrustCommand}
+                >
+                  {copied ? "Copied!" : "Copy command"}
+                </Button>
+                <Button
+                  size="small"
+                  icon={<ArrowClockwise20Regular />}
+                  appearance="primary"
+                  onClick={retryValidate}
+                >
+                  Retry
+                </Button>
+              </div>
+              <Text size={100} className={styles.hint}>
+                Original error: {validateState.error}
+              </Text>
+            </div>
           </MessageBarBody>
         </MessageBar>
       )}
