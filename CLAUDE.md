@@ -1,7 +1,7 @@
-# VSME - globalMOO Excel Web Add-in
+# GMOO - globalMOO Excel Web Add-in
 
 ## Overview
-Office Web Add-in (Office.js) that replaces the legacy VSTO Excel add-in. Uses the globalMOO REST API for VSME optimization instead of a native DLL.
+Office Web Add-in (Office.js) that replaces the legacy VSTO Excel add-in. Uses the globalMOO REST API for GMOO optimization instead of a native DLL.
 
 ## Tech Stack
 - **Runtime**: Office.js (Office Web Add-in)

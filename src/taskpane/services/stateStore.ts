@@ -1,11 +1,30 @@
 // Persists WorkbookState to Excel custom XML parts with Workbook.settings fallback
-import { WorkbookState, DEFAULT_WORKBOOK_STATE } from "../types/workbookState";
+import { WorkbookState, DEFAULT_WORKBOOK_STATE, STATE_SCHEMA_VERSION } from "../types/workbookState";
 
-const XML_NAMESPACE = "vsme-globalmoo-state";
-const SETTINGS_KEY_PREFIX = "vsme_";
+/**
+ * Apply forward migrations to a persisted state. v1 → v2 shifts wizardStep up
+ * by 1 to account for the Resume step inserted at index 1.
+ */
+function migrateState(parsed: Partial<WorkbookState>): Partial<WorkbookState> {
+  const version = parsed.schemaVersion ?? 1;
+  if (version >= STATE_SCHEMA_VERSION) return parsed;
+  const next: Partial<WorkbookState> = { ...parsed };
+  if (version < 2 && typeof next.wizardStep === "number" && next.wizardStep > 0) {
+    next.wizardStep = next.wizardStep + 1;
+  }
+  next.schemaVersion = STATE_SCHEMA_VERSION;
+  return next;
+}
 
-// Keys we also store in Workbook.settings as fallback (critical IDs)
+const XML_NAMESPACE = "gmoo-globalmoo-state";
+const SETTINGS_KEY_PREFIX = "gmoo_";
+
+// Keys we also store in Workbook.settings as fallback (critical IDs).
+// schemaVersion is included so migrateState() can correctly tell whether a
+// fallback-restored wizardStep has already been migrated. Without it the
+// migration would shift v2 wizardSteps a second time on every fallback load.
 const FALLBACK_KEYS: (keyof WorkbookState)[] = [
+  "schemaVersion",
   "modelId",
   "projectId",
   "trialId",
@@ -28,7 +47,7 @@ export async function saveWorkbookState(state: WorkbookState): Promise<void> {
       part.delete();
     }
 
-    const xmlContent = `<vsmeState xmlns="${XML_NAMESPACE}">${escapeXml(JSON.stringify(state))}</vsmeState>`;
+    const xmlContent = `<gmooState xmlns="${XML_NAMESPACE}">${escapeXml(JSON.stringify(state))}</gmooState>`;
     xmlParts.add(xmlContent);
 
     // Also save critical IDs to Workbook.settings as fallback
@@ -56,10 +75,11 @@ export async function loadWorkbookState(): Promise<WorkbookState> {
 
       try {
         const jsonStr = unescapeXml(
-          xml.value.replace(/<\/?vsmeState[^>]*>/g, "")
+          xml.value.replace(/<\/?gmooState[^>]*>/g, "")
         );
-        const parsed = JSON.parse(jsonStr) as WorkbookState;
-        return { ...DEFAULT_WORKBOOK_STATE, ...parsed };
+        const parsed = JSON.parse(jsonStr) as Partial<WorkbookState>;
+        const migrated = migrateState(parsed);
+        return { ...DEFAULT_WORKBOOK_STATE, ...migrated };
       } catch {
         // XML part corrupted, fall through to settings fallback
       }
@@ -81,7 +101,14 @@ export async function loadWorkbookState(): Promise<WorkbookState> {
       if (!setting.isNullObject && setting.value) {
         hasAny = true;
         const val = setting.value;
-        if (key === "wizardStep" || key === "modelId" || key === "projectId" || key === "trialId" || key === "objectiveId") {
+        if (
+          key === "wizardStep" ||
+          key === "modelId" ||
+          key === "projectId" ||
+          key === "trialId" ||
+          key === "objectiveId" ||
+          key === "schemaVersion"
+        ) {
           const num = parseInt(val, 10);
           if (!isNaN(num)) {
             (restored as Record<string, unknown>)[key] = num;
@@ -93,7 +120,9 @@ export async function loadWorkbookState(): Promise<WorkbookState> {
     }
 
     if (hasAny) {
-      return { ...DEFAULT_WORKBOOK_STATE, ...restored };
+      // restored carries its own schemaVersion (if previously saved) so
+      // migrateState can skip the v1→v2 wizardStep shift when not needed.
+      return { ...DEFAULT_WORKBOOK_STATE, ...migrateState(restored) };
     }
 
     return { ...DEFAULT_WORKBOOK_STATE };

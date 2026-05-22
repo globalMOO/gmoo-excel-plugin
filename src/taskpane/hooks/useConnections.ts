@@ -16,6 +16,7 @@ import {
   migrateLegacyKeyIfPresent,
   touchLastUsed,
 } from "../services/connectionsService";
+import { clearAliasesForConnection } from "../services/aliasRegistryService";
 import type { Connection, NewConnectionInput } from "../types/connection";
 
 export interface UseConnectionsOptions {
@@ -143,6 +144,14 @@ export function useConnections(opts: UseConnectionsOptions): UseConnectionsResul
   const remove = useCallback(
     async (id: string) => {
       await svcDelete(id);
+      // Aliases (renames + pins) are scoped per-connection. Drop them now so
+      // stale entries don't reappear if a future connection reuses the same
+      // numeric project/trial/objective ids.
+      try {
+        await clearAliasesForConnection(id);
+      } catch {
+        // Cleanup failure shouldn't block the delete itself.
+      }
       // If we just deleted the active one, clear the workbook pointer; the
       // sync effect above will pick a fallback on the next render.
       if (id === activeConnectionId) {

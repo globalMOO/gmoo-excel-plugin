@@ -1,17 +1,17 @@
 // Pure functions over the Connection list. No React.
-// Persists to OfficeRuntime.storage under vsme.connections.v1, with a
+// Persists to OfficeRuntime.storage under gmoo.connections.v1, with a
 // localStorage fallback (Office Web sometimes blocks OfficeRuntime.storage).
 // All disk operations are read-modify-write the whole array — small list,
 // atomicity beats efficiency.
 
 import type { Connection, ConnectionSource, NewConnectionInput } from "../types/connection";
 
-const STORAGE_KEY = "vsme.connections.v1";
+const STORAGE_KEY = "gmoo.connections.v1";
 
 // Pre-Connections storage keys (single apiKey/apiUrl pair). Migrated to a
 // single Connection on first launch and then removed.
-const LEGACY_KEY_API = "vsme_api_key";
-const LEGACY_KEY_URL = "vsme_api_url";
+const LEGACY_KEY_API = "gmoo_api_key";
+const LEGACY_KEY_URL = "gmoo_api_url";
 
 const MAX_CONNECTIONS = 50;
 

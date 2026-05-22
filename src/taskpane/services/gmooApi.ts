@@ -15,6 +15,19 @@ import type {
   LoadInverseOutputRequest,
 } from "../types/gmoo";
 
+// Endpoints actually exposed by gmoo-api (see config/routes.yaml under "# API"):
+//   GET    /api/models                              → list w/o projects[]
+//   POST   /api/models
+//   GET    /api/models/{id}                         → full tree (projects → trials → objectives → inverses)
+//   POST   /api/models/{id}/projects
+//   POST   /api/projects/{id}/output-cases
+//   POST   /api/trials/{id}/objectives
+//   GET    /api/objectives/{id}                     → objective w/ inverses[] (incl. results[])
+//   POST   /api/objectives/{id}/suggest-inverse
+//   POST   /api/inverses/{id}/load-output
+// There is no GET /api/projects/{id}, /api/trials/{id}, or /api/inverses/{id}.
+// All project/trial lookups must walk the model tree from getModel().
+
 const VALID_INPUT_TYPES = ["boolean", "category", "float", "integer"];
 const MAX_RETRIES = 3;
 const DEFAULT_BASE_URL = "https://app.globalmoo.com/api/";
@@ -117,9 +130,19 @@ export class GmooClient {
   ): Promise<Trial> {
     if (projectId <= 0) throw new Error("Project ID must be greater than zero.");
     if (outputCount <= 0) throw new Error("Output count must be greater than zero.");
-    for (const oc of outputCases) {
-      if (oc.length !== outputCount)
-        throw new Error(`All output cases must have length ${outputCount}.`);
+    if (!Array.isArray(outputCases) || outputCases.length === 0) {
+      throw new Error("Output cases must be a non-empty matrix.");
+    }
+    for (let i = 0; i < outputCases.length; i++) {
+      const oc = outputCases[i];
+      if (!Array.isArray(oc) || oc.length !== outputCount) {
+        throw new Error(`Output case ${i + 1} must be an array of length ${outputCount} (got ${Array.isArray(oc) ? oc.length : typeof oc}).`);
+      }
+      for (let j = 0; j < oc.length; j++) {
+        if (typeof oc[j] !== "number" || !Number.isFinite(oc[j])) {
+          throw new Error(`Output case ${i + 1}, value ${j + 1} is not a finite number (got ${oc[j]}). Check your Excel formulas for empty cells or errors.`);
+        }
+      }
     }
     const request: LoadOutputCasesRequest = { outputCount, outputCases };
     return this.post<Trial>(`projects/${projectId}/output-cases`, request);
@@ -222,7 +245,6 @@ export class GmooClient {
     data?: unknown
   ): Promise<T> {
     const url = this.baseUrl + endpoint;
-    console.log(`[GmooClient] ${method} ${url}`);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       Accept: "application/json",
@@ -236,13 +258,11 @@ export class GmooClient {
     }
 
     const response = await fetch(url, init);
-    console.log(`[GmooClient] ${method} ${url} -> ${response.status}`);
 
     if (!response.ok) {
       let apiError: GmooError | null = null;
       try {
         const body = await response.text();
-        console.log(`[GmooClient] Error body:`, body);
         try { apiError = JSON.parse(body); } catch { /* not JSON */ }
       } catch {
         // Couldn't read response body

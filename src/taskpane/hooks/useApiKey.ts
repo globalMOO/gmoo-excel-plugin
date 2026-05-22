@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
-const STORAGE_KEY_API = "vsme_api_key";
-const STORAGE_KEY_URL = "vsme_api_url";
+const STORAGE_KEY_API = "gmoo_api_key";
+const STORAGE_KEY_URL = "gmoo_api_url";
 const DEFAULT_API_URL = "https://app.globalmoo.com/api/";
 
 // Persistence helpers — try OfficeRuntime.storage first, fall back to localStorage

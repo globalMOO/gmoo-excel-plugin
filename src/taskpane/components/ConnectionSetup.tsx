@@ -146,17 +146,18 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
   const styles = useStyles();
   const [editTarget, setEditTarget] = useState<Connection | "new" | null>(null);
   const [validateState, setValidateState] = useState<{
-    inFlight: boolean;
+    /** Connection id currently under validation, or null if no test is running. */
+    inFlightId: string | null;
     error: string | null;
     failureKind: "api" | "network" | null;
     lastTested: Connection | null;
     validatedId: string | null;
-  }>({ inFlight: false, error: null, failureKind: null, lastTested: null, validatedId: null });
+  }>({ inFlightId: null, error: null, failureKind: null, lastTested: null, validatedId: null });
   const [copied, setCopied] = useState(false);
 
   const validate = async (conn: Connection) => {
     setValidateState({
-      inFlight: true,
+      inFlightId: conn.id,
       error: null,
       failureKind: null,
       lastTested: conn,
@@ -165,11 +166,20 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
     setCopied(false);
     try {
       const host = conn.apiUrl.replace(/\/+$/, "").replace(/\/api$/i, "");
-      const base = host + "/api/";
+      // Mirror useGmooClient's dev rewrite so the Connect-button validation
+      // also goes through the webpack dev proxy and avoids the API's CORS
+      // whitelist when served from https://localhost:3000.
+      const isDev =
+        typeof window !== "undefined" &&
+        window.location.hostname === "localhost" &&
+        host === "https://app.globalmoo.com";
+      const base = isDev
+        ? `${window.location.protocol}//${window.location.host}/api/`
+        : host + "/api/";
       const tempClient = new GmooClient(conn.apiKey, base);
       await tempClient.getModels();
       setValidateState({
-        inFlight: false,
+        inFlightId: null,
         error: null,
         failureKind: null,
         lastTested: conn,
@@ -195,7 +205,7 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
         failureKind = "network";
       }
       setValidateState({
-        inFlight: false,
+        inFlightId: null,
         error: msg,
         failureKind,
         lastTested: conn,
@@ -276,7 +286,7 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
                 key={c.id}
                 connection={c}
                 isActive={c.id === activeConnection?.id}
-                isValidating={validateState.inFlight && validateState.validatedId === null}
+                isValidating={validateState.inFlightId === c.id}
                 onSetActive={() => onSetActive(c.id)}
                 onEdit={() => setEditTarget(c)}
                 onDelete={() => onDelete(c.id)}

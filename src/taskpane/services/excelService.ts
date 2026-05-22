@@ -44,7 +44,7 @@ export async function createTemplateSheet(config: TemplateConfig): Promise<EvalC
     // Row 1: Model name header
     const headerRange = sheet.getRange("A1:D1");
     headerRange.merge();
-    headerRange.values = [[`VSME Model: ${config.modelName}`, "", "", ""]];
+    headerRange.values = [[`GMOO Model: ${config.modelName}`, "", "", ""]];
     headerRange.format.font.bold = true;
     headerRange.format.font.size = 14;
 
@@ -111,7 +111,6 @@ export async function writeInputValues(
   startCol: number,
   values: number[]
 ): Promise<void> {
-  console.log(`[Excel] writeInputValues: sheet="${sheetName}", row=${row}, startCol=${startCol}, values=`, values);
   await Excel.run(async (context) => {
     const sheet = context.workbook.worksheets.getItem(sheetName);
     for (let i = 0; i < values.length; i++) {
@@ -120,7 +119,6 @@ export async function writeInputValues(
       sheet.getRange(cellAddr).values = [[values[i]]];
     }
     await context.sync();
-    console.log(`[Excel] writeInputValues: sync complete`);
   });
 }
 
@@ -168,10 +166,18 @@ export async function readOutputValues(
         errors.push(`Outcome ${i + 1}: ${val}`);
         outputs.push(0);
       } else if (typeof val === "number") {
-        outputs.push(val);
+        if (Number.isFinite(val)) {
+          outputs.push(val);
+        } else {
+          errors.push(`Outcome ${i + 1}: Non-finite value (${val})`);
+          outputs.push(0);
+        }
+      } else if (val === null || val === undefined || val === "") {
+        errors.push(`Outcome ${i + 1}: Empty cell`);
+        outputs.push(0);
       } else {
         const parsed = parseFloat(String(val));
-        if (isNaN(parsed)) {
+        if (!Number.isFinite(parsed)) {
           errors.push(`Outcome ${i + 1}: Non-numeric value "${val}"`);
           outputs.push(0);
         } else {
@@ -188,29 +194,22 @@ export async function evaluateCase(
   config: EvalConfig,
   inputValues: number[]
 ): Promise<{ outputs: number[]; errors: string[] }> {
-  console.log(`[Excel] evaluateCase: config=`, config, `inputs=`, inputValues);
-
   if (config.inputCells && config.outputCells) {
     // Non-contiguous mode: write to individual cells, read from individual cells
     await writeCellValues(config.inputCells, inputValues);
     await calculateAndWait();
-    const result = await readCellValues(config.outputCells);
-    console.log(`[Excel] evaluateCase: outputs=`, result.outputs, `errors=`, result.errors);
-    return result;
+    return readCellValues(config.outputCells);
   }
 
   // Contiguous mode (template sheet)
   await writeInputValues(config.sheetName!, config.inputStartRow!, config.inputStartCol!, inputValues);
   await calculateAndWait();
-  const result = await readOutputValues(
+  return readOutputValues(
     config.sheetName!,
     config.outputStartRow!,
     config.outputStartCol!,
     config.outcomeCount
   );
-
-  console.log(`[Excel] evaluateCase: outputs=`, result.outputs, `errors=`, result.errors);
-  return result;
 }
 
 export async function evaluateAllCases(
@@ -220,6 +219,10 @@ export async function evaluateAllCases(
 ): Promise<{ outputCases: number[][]; errors: string[] }> {
   const outputCases: number[][] = [];
   const allErrors: string[] = [];
+
+  if (!Array.isArray(inputCases) || inputCases.length === 0) {
+    return { outputCases, errors: ["No input cases received — DOE payload is empty."] };
+  }
 
   // Suspend screen updating for performance
   await Excel.run(async (context) => {
@@ -287,7 +290,6 @@ export async function writeCellValues(
   addresses: string[],
   values: number[]
 ): Promise<void> {
-  console.log(`[Excel] writeCellValues: ${addresses.length} cells`);
   await Excel.run(async (context) => {
     for (let i = 0; i < addresses.length; i++) {
       const { sheet, cell } = parseAddress(addresses[i]);
@@ -297,7 +299,6 @@ export async function writeCellValues(
       ws.getRange(cell).values = [[values[i]]];
     }
     await context.sync();
-    console.log(`[Excel] writeCellValues: sync complete`);
   });
 }
 
@@ -326,10 +327,18 @@ export async function readCellValues(
         errors.push(`Outcome ${i + 1} (${addresses[i]}): ${val}`);
         outputs.push(0);
       } else if (typeof val === "number") {
-        outputs.push(val);
+        if (Number.isFinite(val)) {
+          outputs.push(val);
+        } else {
+          errors.push(`Outcome ${i + 1} (${addresses[i]}): Non-finite value (${val})`);
+          outputs.push(0);
+        }
+      } else if (val === null || val === undefined || val === "") {
+        errors.push(`Outcome ${i + 1} (${addresses[i]}): Empty cell`);
+        outputs.push(0);
       } else {
         const parsed = parseFloat(String(val));
-        if (isNaN(parsed)) {
+        if (!Number.isFinite(parsed)) {
           errors.push(`Outcome ${i + 1} (${addresses[i]}): Non-numeric value "${val}"`);
           outputs.push(0);
         } else {
@@ -433,15 +442,18 @@ export async function createExampleSheets(
 
 // --- State sheet persistence ---
 
-const STATE_SHEET_NAME = "_VSME_State";
+const STATE_SHEET_NAME = "_GMOO_State";
 
-export interface VsmeStateData {
+export interface GmooStateData {
+  /** Project the cell mappings belong to. Optional for backward compat with
+   *  pre-tagging sheets — when absent, callers may load tentatively. */
+  projectId?: number;
   variables: { name: string; type: string; min: number; max: number; inputCell: string }[];
   outcomes: { name: string; outputCell: string }[];
 }
 
 /**
- * Check whether the _VSME_State sheet exists in the workbook.
+ * Check whether the _GMOO_State sheet exists in the workbook.
  */
 export async function hasStateSheet(): Promise<boolean> {
   return Excel.run(async (context) => {
@@ -453,10 +465,10 @@ export async function hasStateSheet(): Promise<boolean> {
 }
 
 /**
- * Read saved variable/outcome/cell-mapping state from the _VSME_State sheet.
+ * Read saved variable/outcome/cell-mapping state from the _GMOO_State sheet.
  * Returns null if the sheet doesn't exist or can't be parsed.
  */
-export async function loadStateSheet(): Promise<VsmeStateData | null> {
+export async function loadStateSheet(): Promise<GmooStateData | null> {
   return Excel.run(async (context) => {
     const sheets = context.workbook.worksheets;
     sheets.load("items/name");
@@ -471,19 +483,25 @@ export async function loadStateSheet(): Promise<VsmeStateData | null> {
 
     const rows = usedRange.values as (string | number)[][];
 
-    // Find the "Variables" and "Outcomes" section headers
+    // Find the "Variables", "Outcomes", and optional "Project ID" rows.
     let varHeaderRow = -1;
     let outHeaderRow = -1;
+    let projectId: number | undefined;
     for (let r = 0; r < rows.length; r++) {
       const label = String(rows[r][0]).trim();
       if (label === "Variables") varHeaderRow = r;
-      if (label === "Outcomes") outHeaderRow = r;
+      else if (label === "Outcomes") outHeaderRow = r;
+      else if (label === "Project ID") {
+        const raw = rows[r][1];
+        const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+        if (!isNaN(n) && n > 0) projectId = n;
+      }
     }
 
     if (varHeaderRow === -1 || outHeaderRow === -1) return null;
 
     // Parse variables: rows between varHeaderRow+1 and outHeaderRow (blank row before Outcomes)
-    const variables: VsmeStateData["variables"] = [];
+    const variables: GmooStateData["variables"] = [];
     for (let r = varHeaderRow + 1; r < outHeaderRow; r++) {
       const name = String(rows[r][1] ?? "").trim();
       if (!name) continue; // skip blank rows
@@ -497,7 +515,7 @@ export async function loadStateSheet(): Promise<VsmeStateData | null> {
     }
 
     // Parse outcomes: rows after outHeaderRow until end
-    const outcomes: VsmeStateData["outcomes"] = [];
+    const outcomes: GmooStateData["outcomes"] = [];
     for (let r = outHeaderRow + 1; r < rows.length; r++) {
       const name = String(rows[r][1] ?? "").trim();
       if (!name) continue;
@@ -508,15 +526,15 @@ export async function loadStateSheet(): Promise<VsmeStateData | null> {
     }
 
     if (variables.length === 0 || outcomes.length === 0) return null;
-    return { variables, outcomes };
+    return { projectId, variables, outcomes };
   });
 }
 
 /**
- * Save variable/outcome/cell-mapping state to the _VSME_State sheet.
+ * Save variable/outcome/cell-mapping state to the _GMOO_State sheet.
  * Creates or replaces the sheet.
  */
-export async function saveStateSheet(data: VsmeStateData): Promise<void> {
+export async function saveStateSheet(data: GmooStateData): Promise<void> {
   await Excel.run(async (context) => {
     const sheets = context.workbook.worksheets;
     sheets.load("items/name");
@@ -532,9 +550,17 @@ export async function saveStateSheet(data: VsmeStateData): Promise<void> {
     const sheet = sheets.add(STATE_SHEET_NAME);
 
     // Header
-    sheet.getRange("A1").values = [["VSME Configuration"]];
+    sheet.getRange("A1").values = [["GMOO Configuration"]];
     sheet.getRange("A1").format.font.bold = true;
     sheet.getRange("A1").format.font.size = 12;
+
+    // Optional project tag (row 2) — used by App.tsx to verify the saved
+    // mappings still describe the currently-active project before auto-loading.
+    if (typeof data.projectId === "number" && data.projectId > 0) {
+      sheet.getRange("A2").values = [["Project ID"]];
+      sheet.getRange("A2").format.font.color = "#605E5C";
+      sheet.getRange("B2").values = [[data.projectId]];
+    }
 
     // Variables section
     const varHeaderRow = 3;
@@ -592,7 +618,7 @@ function delay(ms: number): Promise<void> {
 
 // --- Multi-Solve solution persistence ---
 
-const MULTI_SOLVE_SHEET = "VSME Multi-Solve";
+const MULTI_SOLVE_SHEET = "GMOO Multi-Solve";
 
 export interface MultiSolveRunRow {
   runIndex: number;        // 0-based
@@ -609,7 +635,7 @@ export interface MultiSolveRunRow {
 }
 
 /**
- * Appends a per-run diagnostic row to the "VSME Multi-Solve" sheet. Every
+ * Appends a per-run diagnostic row to the "GMOO Multi-Solve" sheet. Every
  * random-start run writes one row — unique, duplicate, and failed alike —
  * so the user can diagnose why the optimizer does or doesn't find distinct
  * solutions. `resetSheet=true` wipes any existing sheet (called on the first

@@ -24,7 +24,7 @@ import { CursorClick20Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { InputVariable } from "../types/workbookState";
 import type { EvalConfig } from "../services/excelService";
-import { createTemplateSheet, evaluateAllCases, readSelectedRange, loadStateSheet, saveStateSheet, type VsmeStateData } from "../services/excelService";
+import { createTemplateSheet, evaluateAllCases, readSelectedRange, loadStateSheet, saveStateSheet, type GmooStateData } from "../services/excelService";
 
 const useStyles = makeStyles({
   container: {
@@ -71,6 +71,8 @@ interface CaseEvaluationProps {
   initialEvalConfig?: EvalConfig;
   onComplete: (trialId: number, evalConfig: EvalConfig) => void;
   onBack: () => void;
+  /** Optional slot rendered above the body (e.g. PickExistingBar). */
+  headerSlot?: React.ReactNode;
 }
 
 export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
@@ -84,6 +86,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
   initialEvalConfig,
   onComplete,
   onBack,
+  headerSlot,
 }) => {
   const styles = useStyles();
 
@@ -108,15 +111,22 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
   const [stateLoaded, setStateLoaded] = useState(false);
   const [isLoadingState, setIsLoadingState] = useState(false);
 
-  // Auto-detect _VSME_State sheet when switching to "existing" mode
+  // Auto-detect _GMOO_State sheet when switching to "existing" mode
   useEffect(() => {
     if (mode !== "existing" || sheetCreated || stateLoaded || initialEvalConfig) return;
 
     let cancelled = false;
     setIsLoadingState(true);
 
-    loadStateSheet().then((data: VsmeStateData | null) => {
+    loadStateSheet().then((data: GmooStateData | null) => {
       if (cancelled || !data) {
+        setIsLoadingState(false);
+        return;
+      }
+      // If the sheet was tagged with a project id, only auto-fill when it
+      // matches — otherwise we'd silently apply another project's cells to
+      // this one whenever variable names happen to overlap.
+      if (typeof data.projectId === "number" && data.projectId !== projectId) {
         setIsLoadingState(false);
         return;
       }
@@ -144,7 +154,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     });
 
     return () => { cancelled = true; };
-  }, [mode, sheetCreated, stateLoaded, initialEvalConfig, variables, outcomeNames]);
+  }, [mode, sheetCreated, stateLoaded, initialEvalConfig, variables, outcomeNames, projectId]);
 
   const handleCreateTemplate = async () => {
     setIsCreatingSheet(true);
@@ -238,7 +248,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         outputCases
       );
 
-      // Save cell mappings to _VSME_State sheet for future re-use
+      // Save cell mappings to _GMOO_State sheet for future re-use
       const inputCells = evalConfig.inputCells ?? variables.map((_, i) => {
         const col = String.fromCharCode(64 + (evalConfig.inputStartCol ?? 2) + i);
         return `${evalConfig.sheetName}!${col}${evalConfig.inputStartRow ?? 7}`;
@@ -249,6 +259,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       });
       try {
         await saveStateSheet({
+          projectId,
           variables: variables.map((v, i) => ({
             name: v.name,
             type: v.type,
@@ -263,7 +274,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         });
       } catch {
         // Non-critical — don't fail the evaluation if state save fails
-        console.warn("[VSME] Failed to save state sheet");
+        console.warn("[GMOO] Failed to save state sheet");
       }
 
       onComplete(trial.id, evalConfig);
@@ -274,11 +285,74 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     }
   };
 
-  const allInputsMapped = inputCellMap.every((c) => c.trim());
-  const allOutputsMapped = outputCellMap.every((c) => c.trim());
+  // Require at least one row in each map — `[].every` is vacuously true, so
+  // an empty outcomeNames array would otherwise silently flip the badge to
+  // "all mapped" and let the user submit a 0-output trial that the API
+  // rejects with a cryptic "Output count must be greater than zero".
+  const allInputsMapped = inputCellMap.length > 0 && inputCellMap.every((c) => c.trim());
+  const allOutputsMapped = outputCellMap.length > 0 && outputCellMap.every((c) => c.trim());
+
+  // Empty inputCases means we landed here from a Resume-from-Project flow
+  // where the project DTO didn't ship the (often-large) cases array. There's
+  // nothing to evaluate, and submitting an empty trial would silently corrupt
+  // the project. Bail out with a hint instead.
+  if (inputCases.length === 0) {
+    return (
+      <div className={styles.container}>
+        {headerSlot}
+        <Text weight="semibold" size={400}>
+          Evaluate Input Cases
+        </Text>
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            <MessageBarTitle>No input cases loaded</MessageBarTitle>
+            This project doesn&apos;t carry its input cases in the resume payload.
+            Use the &quot;Switch trial&quot; selector above to pick a trial that&apos;s already
+            been trained, or go back and start a new project from scratch.
+          </MessageBarBody>
+        </MessageBar>
+        <div className={styles.buttonRow}>
+          <Button appearance="secondary" onClick={onBack}>
+            Back
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // Same defensive bail when the model has no outcomes defined. This shows up
+  // after a Resume-from-Project where the project has no trial yet (so the
+  // App couldn't infer outputCount), or when an older workbook's state file
+  // was loaded with an empty outcomeNames array. Without this guard the user
+  // sees an empty Outputs table, a vacuously-true "all mapped" badge, and a
+  // 400 from the API on submit.
+  if (outcomeNames.length === 0 || variables.length === 0) {
+    return (
+      <div className={styles.container}>
+        {headerSlot}
+        <Text weight="semibold" size={400}>
+          Evaluate Input Cases
+        </Text>
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            <MessageBarTitle>Model definition is incomplete</MessageBarTitle>
+            This project has {variables.length} input{variables.length === 1 ? "" : "s"} and{" "}
+            {outcomeNames.length} outcome{outcomeNames.length === 1 ? "" : "s"} defined in
+            this workbook. Go back to Define Model to set them up before evaluating cases.
+          </MessageBarBody>
+        </MessageBar>
+        <div className={styles.buttonRow}>
+          <Button appearance="secondary" onClick={onBack}>
+            Back to Define Model
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={styles.container}>
+      {headerSlot}
       <Text weight="semibold" size={400}>
         Evaluate Input Cases
       </Text>
@@ -315,7 +389,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
           <MessageBarBody>
             <MessageBarTitle>Template Created</MessageBarTitle>
             Fill in your outcome formulas in column B (rows 11+), referencing the Current Value
-            cells in row 7. Then click "Evaluate All Cases".
+            cells in row 7. Then click "Evaluate Cases & Create New Trial".
           </MessageBarBody>
         </MessageBar>
       )}
@@ -444,13 +518,19 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       )}
 
       {sheetCreated && (
-        <Button
-          appearance="primary"
-          onClick={handleEvaluate}
-          disabled={isEvaluating}
-        >
-          {isEvaluating ? <Spinner size="tiny" /> : "Evaluate All Cases"}
-        </Button>
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+          <Button
+            appearance="primary"
+            onClick={handleEvaluate}
+            disabled={isEvaluating}
+          >
+            {isEvaluating ? <Spinner size="tiny" /> : "Evaluate Cases & Create New Trial"}
+          </Button>
+          <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+            Runs your formulas against all {inputCases.length} input case{inputCases.length === 1 ? "" : "s"} and
+            submits the results as a new trial. Existing trials in this project aren't modified.
+          </Text>
+        </div>
       )}
 
       {isEvaluating && (

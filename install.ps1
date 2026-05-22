@@ -1,4 +1,4 @@
-# GlobalMOO VSME Excel Add-in Installer
+# GlobalMOO GMOO Excel Add-in Installer
 # Installs the add-in for the current user without admin rights.
 # Requires PowerShell 5.1+ and Excel for Microsoft 365 (desktop).
 #
@@ -39,8 +39,8 @@ $regDeveloper    = "HKCU:\Software\Microsoft\Office\16.0\WEF\Developer"
 $oldCatalogKey   = "HKCU:\Software\Microsoft\Office\16.0\WEF\TrustedCatalogs\{7B3A2F4C-1E9D-4B8A-A6C5-3D0E2F9B1C7A}"
 
 Write-Host ""
-Write-Host "GlobalMOO VSME Excel Add-in Installer" -ForegroundColor Cyan
-Write-Host "======================================" -ForegroundColor Cyan
+Write-Host "GlobalMOO GMOO Excel Add-in Installer" -ForegroundColor Cyan
+Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host ""
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -344,9 +344,9 @@ Write-Host ""
 Write-Host "Installation complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next step:" -ForegroundColor Cyan
-Write-Host "  Open Excel -- the GlobalMOO VSME add-in will appear in your Home ribbon."
+Write-Host "  Open Excel -- the GlobalMOO GMOO add-in will appear in your Home ribbon."
 Write-Host "  In the task pane, add a Connection pointing at: $ApiUrl"
 Write-Host ""
 Write-Host "If it does not appear, go to:" -ForegroundColor Gray
-Write-Host "  Home -> Add-ins -> and look for GlobalMOO VSME in the panel." -ForegroundColor Gray
+Write-Host "  Home -> Add-ins -> and look for GlobalMOO GMOO in the panel." -ForegroundColor Gray
 Write-Host ""

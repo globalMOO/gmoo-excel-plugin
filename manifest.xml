@@ -10,7 +10,7 @@
   <Version>1.0.0.0</Version>
   <ProviderName>globalMOO</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="VSME - globalMOO" />
+  <DisplayName DefaultValue="GMOO - globalMOO" />
   <Description DefaultValue="Virtual Subject Matter Expert optimization powered by globalMOO" />
   <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png" />
   <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png" />
@@ -90,13 +90,13 @@
         <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html" />
       </bt:Urls>
       <bt:ShortStrings>
-        <bt:String id="GetStarted.Title" DefaultValue="VSME - globalMOO" />
+        <bt:String id="GetStarted.Title" DefaultValue="GMOO - globalMOO" />
         <bt:String id="CommandsGroup.Label" DefaultValue="globalMOO" />
-        <bt:String id="TaskpaneButton.Label" DefaultValue="VSME" />
+        <bt:String id="TaskpaneButton.Label" DefaultValue="GMOO" />
       </bt:ShortStrings>
       <bt:LongStrings>
-        <bt:String id="GetStarted.Description" DefaultValue="Open the VSME task pane to define models and run optimization." />
-        <bt:String id="TaskpaneButton.Tooltip" DefaultValue="Open VSME - globalMOO optimization task pane" />
+        <bt:String id="GetStarted.Description" DefaultValue="Open the GMOO task pane to define models and run optimization." />
+        <bt:String id="TaskpaneButton.Tooltip" DefaultValue="Open GMOO - globalMOO optimization task pane" />
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>

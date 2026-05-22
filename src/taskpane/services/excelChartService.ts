@@ -14,7 +14,7 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
     const sheets = context.workbook.worksheets;
 
     // Delete existing Results sheet if it exists
-    const existingSheet = sheets.getItemOrNullObject("VSME Results");
+    const existingSheet = sheets.getItemOrNullObject("GMOO Results");
     existingSheet.load("isNullObject");
     await context.sync();
     if (!existingSheet.isNullObject) {
@@ -22,7 +22,7 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
       await context.sync();
     }
 
-    const sheet = sheets.add("VSME Results");
+    const sheet = sheets.add("GMOO Results");
     const iterations = data.iterations;
     const n = iterations.length;
 
@@ -165,7 +165,7 @@ export async function createMultiSolveRadarCharts(
 ): Promise<void> {
   await Excel.run(async (context) => {
     const sheets = context.workbook.worksheets;
-    const SHEET_NAME = "VSME Multi-Solve Charts";
+    const SHEET_NAME = "GMOO Multi-Solve Charts";
 
     const existing = sheets.getItemOrNullObject(SHEET_NAME);
     existing.load("isNullObject");

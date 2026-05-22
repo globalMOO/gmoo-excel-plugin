@@ -23,6 +23,18 @@ module.exports = async (env, options) => {
         },
         port: 3000,
         hot: true,
+        // Same-origin proxy so the dev taskpane can reach the prod API
+        // without tripping the API's CORS whitelist (which only allows
+        // https://globalmoo.github.io). useGmooClient swaps the prod URL
+        // for https://localhost:3000/api/ in dev so requests land here.
+        proxy: [
+          {
+            context: ["/api"],
+            target: "https://app.globalmoo.com",
+            changeOrigin: true,
+            secure: true,
+          },
+        ],
       },
     };
   }
