@@ -350,3 +350,6 @@ Write-Host ""
 Write-Host "If it does not appear, go to:" -ForegroundColor Gray
 Write-Host "  Home -> Add-ins -> and look for GlobalMOO GMOO in the panel." -ForegroundColor Gray
 Write-Host ""
+Write-Host "Full install & troubleshooting guide:" -ForegroundColor Gray
+Write-Host "  https://github.com/globalMOO/gmoo-excel-plugin/blob/main/CUSTOMER-INSTALL.md" -ForegroundColor Gray
+Write-Host ""
