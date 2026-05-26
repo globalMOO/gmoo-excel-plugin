@@ -256,7 +256,7 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
       {chartsCreated && (
         <MessageBar intent="success">
           <MessageBarBody>
-            Charts created on the "VSME Results" sheet.
+            Charts created on the "GMOO Results" sheet.
           </MessageBarBody>
         </MessageBar>
       )}

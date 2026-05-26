@@ -6,7 +6,12 @@ export interface InputVariable {
   categories?: string[];
 }
 
+/** Bumped when the WizardStep enum is renumbered. Used by stateStore to migrate
+ *  persisted values; current schema is 2 (after the Resume step was inserted). */
+export const STATE_SCHEMA_VERSION = 2;
+
 export interface WorkbookState {
+  schemaVersion?: number;
   apiKeyHint: string;
   /** ID of the Connection (from connectionsService) selected for this workbook. */
   activeConnectionId: string | null;
@@ -20,12 +25,11 @@ export interface WorkbookState {
   inputCases: number[][] | null;
   formulaMode: "template" | "existing";
   sheetName: string | null;
-  inputRangeAddress: string | null;
-  outputRangeAddress: string | null;
   wizardStep: number;
 }
 
 export const DEFAULT_WORKBOOK_STATE: WorkbookState = {
+  schemaVersion: STATE_SCHEMA_VERSION,
   apiKeyHint: "",
   activeConnectionId: null,
   modelId: null,
@@ -38,23 +42,23 @@ export const DEFAULT_WORKBOOK_STATE: WorkbookState = {
   inputCases: null,
   formulaMode: "template",
   sheetName: null,
-  inputRangeAddress: null,
-  outputRangeAddress: null,
   wizardStep: 0,
 };
 
 export enum WizardStep {
   Connect = 0,
-  DefineModel = 1,
-  EvaluateCases = 2,
-  SetObjectives = 3,
-  Optimize = 4,
-  Results = 5,
-  MultiSolve = 6,
+  Resume = 1,
+  DefineModel = 2,
+  EvaluateCases = 3,
+  SetObjectives = 4,
+  Optimize = 5,
+  Results = 6,
+  MultiSolve = 7,
 }
 
 export const WIZARD_STEP_LABELS: Record<WizardStep, string> = {
   [WizardStep.Connect]: "Connect",
+  [WizardStep.Resume]: "Resume / New",
   [WizardStep.DefineModel]: "Define Model",
   [WizardStep.EvaluateCases]: "Evaluate Cases",
   [WizardStep.SetObjectives]: "Set Objectives",

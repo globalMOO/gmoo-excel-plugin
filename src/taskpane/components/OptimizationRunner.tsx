@@ -54,6 +54,9 @@ interface OptimizationRunnerProps {
   onRunSingle: () => void;
   onNext: () => void;
   onBack: () => void;
+  /** Non-null when prerequisites aren't met (e.g. no spreadsheet bound after
+   *  resume-from-objective). Disables Run controls and surfaces the reason. */
+  notReadyMessage?: string | null;
 }
 
 export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
@@ -63,6 +66,7 @@ export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
   onRunSingle,
   onNext,
   onBack,
+  notReadyMessage,
 }) => {
   const styles = useStyles();
   const [maxIterations, setMaxIterations] = useState(100);
@@ -93,6 +97,15 @@ export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
         Optimization
       </Text>
 
+      {notReadyMessage && (
+        <MessageBar intent="warning">
+          <MessageBarBody>
+            <MessageBarTitle>Not ready to optimize</MessageBarTitle>
+            {notReadyMessage}
+          </MessageBarBody>
+        </MessageBar>
+      )}
+
       {/* Auto Mode Controls */}
       <Card>
         <div style={{ padding: "12px" }}>
@@ -104,8 +117,16 @@ export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
             <Input
               size="small"
               type="number"
+              min={1}
               value={String(maxIterations)}
-              onChange={(_, data) => setMaxIterations(parseInt(data.value) || 100)}
+              onChange={(_, data) => {
+                const n = parseInt(data.value, 10);
+                // Clamp to ≥1 so the user can't ship a no-op run; treat
+                // non-numeric input as "keep the previous value" instead of
+                // snapping silently back to 100.
+                if (isNaN(n)) return;
+                setMaxIterations(Math.max(1, n));
+              }}
               style={{ width: "80px" }}
               disabled={state.isRunning}
             />
@@ -114,6 +135,7 @@ export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
                 icon={<Play20Regular />}
                 appearance="primary"
                 onClick={() => onRun(maxIterations)}
+                disabled={!!notReadyMessage}
               >
                 {isPaused ? "Resume" : "Run"}
               </Button>
@@ -141,7 +163,7 @@ export const OptimizationRunner: React.FC<OptimizationRunnerProps> = ({
               icon={<Next20Regular />}
               appearance="secondary"
               onClick={onRunSingle}
-              disabled={state.isRunning}
+              disabled={state.isRunning || !!notReadyMessage}
             >
               Next Iteration
             </Button>

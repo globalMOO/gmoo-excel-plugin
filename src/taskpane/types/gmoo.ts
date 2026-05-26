@@ -105,7 +105,6 @@ export interface Inverse extends GmooBase {
   computeTime: number;
   input: number[];
   output: number[];
-  errors: number[];
   results: Result[];
 }
 

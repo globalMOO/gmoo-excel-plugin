@@ -34,13 +34,13 @@ describe("loadConnections", () => {
   });
 
   it("returns [] on malformed JSON", async () => {
-    localStorage.setItem("vsme.connections.v1", "not json");
+    localStorage.setItem("gmoo.connections.v1", "not json");
     expect(await loadConnections()).toEqual([]);
   });
 
   it("filters out entries missing required fields", async () => {
     localStorage.setItem(
-      "vsme.connections.v1",
+      "gmoo.connections.v1",
       JSON.stringify([
         { id: "a", label: "ok", apiUrl: "https://x", apiKey: "k", source: "manual", createdAt: "" },
         { id: "b", label: "missing url" }, // invalid
@@ -160,26 +160,26 @@ describe("touchLastUsed", () => {
 
 describe("migrateLegacyKeyIfPresent", () => {
   it("creates 'Default (migrated)' from legacy keys and clears them", async () => {
-    localStorage.setItem("vsme_api_key", "legacy-key");
-    localStorage.setItem("vsme_api_url", "https://app.globalmoo.com/api/");
+    localStorage.setItem("gmoo_api_key", "legacy-key");
+    localStorage.setItem("gmoo_api_url", "https://app.globalmoo.com/api/");
     const migrated = await migrateLegacyKeyIfPresent();
     expect(migrated).not.toBeNull();
     expect(migrated!.label).toBe("Default (migrated)");
     expect(migrated!.apiKey).toBe("legacy-key");
     expect(migrated!.apiUrl).toBe("https://app.globalmoo.com"); // /api/ suffix stripped
-    expect(localStorage.getItem("vsme_api_key")).toBeNull();
-    expect(localStorage.getItem("vsme_api_url")).toBeNull();
+    expect(localStorage.getItem("gmoo_api_key")).toBeNull();
+    expect(localStorage.getItem("gmoo_api_url")).toBeNull();
   });
 
   it("is a no-op when connections already exist", async () => {
     await createConnection({ label: "Existing", apiUrl: "https://x", apiKey: "" });
-    localStorage.setItem("vsme_api_key", "should-not-migrate");
-    localStorage.setItem("vsme_api_url", "https://x");
+    localStorage.setItem("gmoo_api_key", "should-not-migrate");
+    localStorage.setItem("gmoo_api_url", "https://x");
     const result = await migrateLegacyKeyIfPresent();
     expect(result).toBeNull();
     // Defensive cleanup still happens.
-    expect(localStorage.getItem("vsme_api_key")).toBeNull();
-    expect(localStorage.getItem("vsme_api_url")).toBeNull();
+    expect(localStorage.getItem("gmoo_api_key")).toBeNull();
+    expect(localStorage.getItem("gmoo_api_url")).toBeNull();
     const list = await loadConnections();
     expect(list).toHaveLength(1);
     expect(list[0].label).toBe("Existing");
@@ -190,8 +190,8 @@ describe("migrateLegacyKeyIfPresent", () => {
   });
 
   it("is idempotent on second call", async () => {
-    localStorage.setItem("vsme_api_key", "legacy");
-    localStorage.setItem("vsme_api_url", "https://x");
+    localStorage.setItem("gmoo_api_key", "legacy");
+    localStorage.setItem("gmoo_api_url", "https://x");
     await migrateLegacyKeyIfPresent();
     const second = await migrateLegacyKeyIfPresent();
     expect(second).toBeNull();
@@ -200,7 +200,7 @@ describe("migrateLegacyKeyIfPresent", () => {
   });
 
   it("handles missing key (URL only)", async () => {
-    localStorage.setItem("vsme_api_url", "https://x");
+    localStorage.setItem("gmoo_api_url", "https://x");
     const migrated = await migrateLegacyKeyIfPresent();
     expect(migrated).not.toBeNull();
     expect(migrated!.apiKey).toBe("");

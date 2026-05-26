@@ -190,7 +190,7 @@ export const MultiSolvePanel: React.FC<MultiSolvePanelProps> = ({
 
   const stopReasonLabel =
     multi.progress?.stage === "done"
-      ? `Completed ${multi.progress.run} of ${multi.progress.totalRuns} runs — ${multi.solutions.length} solution${multi.solutions.length === 1 ? "" : "s"} reported${multi.runsFailed > 0 ? ` (${multi.runsFailed} run${multi.runsFailed === 1 ? "" : "s"} failed)` : ""}. Per-run log on the "VSME Multi-Solve" sheet — the "Dist. to nearest" column shows normalized-input distance between solutions so you can see how clustered they are.`
+      ? `Completed ${multi.progress.run} of ${multi.progress.totalRuns} runs — ${multi.solutions.length} solution${multi.solutions.length === 1 ? "" : "s"} reported${multi.runsFailed > 0 ? ` (${multi.runsFailed} run${multi.runsFailed === 1 ? "" : "s"} failed)` : ""}. Per-run log on the "GMOO Multi-Solve" sheet — the "Dist. to nearest" column shows normalized-input distance between solutions so you can see how clustered they are.`
       : null;
 
   // Clear pin when the solution list shrinks (e.g. Clear button) so we don't
@@ -280,6 +280,10 @@ export const MultiSolvePanel: React.FC<MultiSolvePanelProps> = ({
             </Button>
           )}
         </div>
+        <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+          Each run creates a new objective on the server ({numRuns} total this
+          batch) so it counts against your account's optimization quota.
+        </Text>
 
         {/* Progress */}
         {multi.isRunning && multi.progress && (
@@ -461,7 +465,7 @@ export const MultiSolvePanel: React.FC<MultiSolvePanelProps> = ({
           </Button>
           {chartsExported && !exportError && (
             <Text size={100}>
-              Charts created on the "VSME Multi-Solve Charts" sheet.
+              Charts created on the "GMOO Multi-Solve Charts" sheet.
             </Text>
           )}
           {exportError && (

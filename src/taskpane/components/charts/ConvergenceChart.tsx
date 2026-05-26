@@ -32,12 +32,19 @@ interface ConvergenceChartProps {
 export const ConvergenceChart: React.FC<ConvergenceChartProps> = ({ iterations }) => {
   if (iterations.length === 0) return null;
 
+  const values = iterations.map((inv) => filteredL1Norm(inv));
+  // Chart.js logarithmic scale silently drops or crashes on zero/negative
+  // values. That hits when the user's objectives are all inequality / min /
+  // max (filteredL1Norm returns 0) or when convergence reaches exact zero —
+  // both are normal outcomes. Fall back to linear in those cases.
+  const useLogScale = values.every((v) => v > 0);
+
   const data = {
     labels: iterations.map((inv) => inv.iteration),
     datasets: [
       {
         label: "Error",
-        data: iterations.map((inv) => filteredL1Norm(inv)),
+        data: values,
         borderColor: "#0078d4",
         backgroundColor: "rgba(0, 120, 212, 0.1)",
         borderWidth: 2,
@@ -73,7 +80,7 @@ export const ConvergenceChart: React.FC<ConvergenceChartProps> = ({ iterations }
         },
       },
       y: {
-        type: "logarithmic" as const,
+        type: useLogScale ? ("logarithmic" as const) : ("linear" as const),
         title: {
           display: true,
           text: "Error",

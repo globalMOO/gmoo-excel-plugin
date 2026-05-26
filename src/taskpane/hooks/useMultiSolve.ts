@@ -151,7 +151,7 @@ export function useMultiSolve(
       const inputVarNames = inputVariables.map((v) => v.name);
 
       try {
-        // Write a single diagnostic row per run to the "VSME Multi-Solve" sheet.
+        // Write a single diagnostic row per run to the "GMOO Multi-Solve" sheet.
         // Wrapped so we can centralize the sheet-reset flag and error handling.
         const logRun = async (
           runIndex: number,

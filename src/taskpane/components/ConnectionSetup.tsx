@@ -30,7 +30,8 @@ import {
   Copy20Regular,
   ArrowClockwise20Regular,
 } from "@fluentui/react-icons";
-import { GmooClient, GmooApiError } from "../services/gmooApi";
+import { GmooClient } from "../services/gmooApi";
+import { diagnoseConnection, buildCertTrustCommand } from "../services/connectionDiagnostics";
 import type { Connection, NewConnectionInput } from "../types/connection";
 
 const useStyles = makeStyles({
@@ -146,69 +147,81 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
   const styles = useStyles();
   const [editTarget, setEditTarget] = useState<Connection | "new" | null>(null);
   const [validateState, setValidateState] = useState<{
-    inFlight: boolean;
+    /** Connection id currently under validation, or null if no test is running. */
+    inFlightId: string | null;
     error: string | null;
     failureKind: "api" | "network" | null;
+    /**
+     * Result of follow-up no-cors probe when failureKind is "network".
+     * true  = server is reachable + TLS-trusted, so the original failure was CORS.
+     * false = probe also failed (cert untrusted / DNS / network unreachable).
+     * null  = probe didn't run (dev mode, or failure wasn't network-class).
+     */
+    corsReachable: boolean | null;
     lastTested: Connection | null;
     validatedId: string | null;
-  }>({ inFlight: false, error: null, failureKind: null, lastTested: null, validatedId: null });
+  }>({
+    inFlightId: null,
+    error: null,
+    failureKind: null,
+    corsReachable: null,
+    lastTested: null,
+    validatedId: null,
+  });
   const [copied, setCopied] = useState(false);
 
   const validate = async (conn: Connection) => {
     setValidateState({
-      inFlight: true,
+      inFlightId: conn.id,
       error: null,
       failureKind: null,
+      corsReachable: null,
       lastTested: conn,
       validatedId: null,
     });
     setCopied(false);
-    try {
-      const host = conn.apiUrl.replace(/\/+$/, "").replace(/\/api$/i, "");
-      const base = host + "/api/";
-      const tempClient = new GmooClient(conn.apiKey, base);
-      await tempClient.getModels();
-      setValidateState({
-        inFlight: false,
-        error: null,
-        failureKind: null,
-        lastTested: conn,
-        validatedId: conn.id,
-      });
-    } catch (err) {
-      // GmooApiError = round-trip succeeded, server returned a status code.
-      // Anything else (typically TypeError "Failed to fetch") = round-trip
-      // never completed: cert untrusted, CORS rejected, DNS, network, etc.
-      // The fetch API hides the underlying cause, so we surface a hand-off
-      // that runs the cert-trust installer — which gives useful diagnostics
-      // either way (cert imported, host unreachable, etc.).
-      let msg: string;
-      let failureKind: "api" | "network";
-      if (err instanceof GmooApiError && err.status === 401) {
-        msg = "Invalid API key.";
-        failureKind = "api";
-      } else if (err instanceof GmooApiError) {
-        msg = `API error (${err.status}): ${err.apiError?.message ?? "Unknown error"}`;
-        failureKind = "api";
-      } else {
-        msg = err instanceof Error ? err.message : "Unknown error";
-        failureKind = "network";
-      }
-      setValidateState({
-        inFlight: false,
-        error: msg,
-        failureKind,
-        lastTested: conn,
-        validatedId: null,
-      });
-    }
-  };
 
-  const buildCertTrustCommand = (apiUrl: string): string => {
-    // Single-quote the URL so PowerShell takes it literally. We sanitize any
-    // embedded single quotes by doubling them (PS string-escape convention).
-    const safeUrl = apiUrl.replace(/'/g, "''");
-    return `& ([scriptblock]::Create((irm https://globalmoo.github.io/gmoo-excel-plugin/install.ps1))) -ApiUrl '${safeUrl}' -CertOnly`;
+    const host = conn.apiUrl.replace(/\/+$/, "").replace(/\/api$/i, "");
+    // Mirror useGmooClient's dev rewrite so the Connect-button validation
+    // also goes through the webpack dev proxy and avoids the API's CORS
+    // whitelist when served from https://localhost:3000.
+    const isDev =
+      typeof window !== "undefined" &&
+      window.location.hostname === "localhost" &&
+      host === "https://app.globalmoo.com";
+    const base = isDev
+      ? `${window.location.protocol}//${window.location.host}/api/`
+      : host + "/api/";
+
+    const client = new GmooClient(conn.apiKey, base);
+    const result = await diagnoseConnection({
+      client,
+      probeHost: isDev ? null : host,
+    });
+
+    // Drop the result if the user kicked off a different test in the
+    // meantime — otherwise we'd clobber the newer in-flight spinner.
+    setValidateState((prev) =>
+      prev.inFlightId !== conn.id
+        ? prev
+        : result.ok
+        ? {
+            inFlightId: null,
+            error: null,
+            failureKind: null,
+            corsReachable: null,
+            lastTested: conn,
+            validatedId: conn.id,
+          }
+        : {
+            inFlightId: null,
+            error: result.error,
+            failureKind: result.failureKind,
+            corsReachable: result.corsReachable,
+            lastTested: conn,
+            validatedId: null,
+          }
+    );
   };
 
   const copyCertTrustCommand = async () => {
@@ -276,7 +289,7 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
                 key={c.id}
                 connection={c}
                 isActive={c.id === activeConnection?.id}
-                isValidating={validateState.inFlight && validateState.validatedId === null}
+                isValidating={validateState.inFlightId === c.id}
                 onSetActive={() => onSetActive(c.id)}
                 onEdit={() => setEditTarget(c)}
                 onDelete={() => onDelete(c.id)}
@@ -304,52 +317,144 @@ export const ConnectionSetup: React.FC<ConnectionSetupProps> = ({
         </MessageBar>
       )}
 
-      {validateState.error && validateState.failureKind === "network" && validateState.lastTested && (
-        <MessageBar intent="warning">
-          <MessageBarBody>
-            <MessageBarTitle>
-              Couldn't reach{" "}
-              {(() => {
-                try {
-                  return new URL(validateState.lastTested.apiUrl).hostname;
-                } catch {
-                  return validateState.lastTested.apiUrl;
-                }
-              })()}
-            </MessageBarTitle>
-            <div className={styles.certBlock}>
-              <Text size={200}>
-                This usually means the server's TLS certificate isn't trusted by
-                Windows (also fires on DNS / network / CORS failures). Open
-                PowerShell on this machine and run:
-              </Text>
-              <pre className={styles.certCommand}>
-                {buildCertTrustCommand(validateState.lastTested.apiUrl)}
-              </pre>
-              <div className={styles.certActions}>
-                <Button
-                  size="small"
-                  icon={<Copy20Regular />}
-                  onClick={copyCertTrustCommand}
-                >
-                  {copied ? "Copied!" : "Copy command"}
-                </Button>
-                <Button
-                  size="small"
-                  icon={<ArrowClockwise20Regular />}
-                  appearance="primary"
-                  onClick={retryValidate}
-                >
-                  Retry
-                </Button>
+      {validateState.error &&
+        validateState.failureKind === "network" &&
+        validateState.corsReachable === true &&
+        validateState.lastTested && (() => {
+          // The origin the customer's server needs to allow is whatever this
+          // task pane is served from — typically https://globalmoo.github.io,
+          // but anyone hosting a fork (or running dev) sees the right value.
+          const origin =
+            typeof window !== "undefined" ? window.location.origin : "https://globalmoo.github.io";
+          return (
+          <MessageBar intent="warning">
+            <MessageBarBody>
+              <MessageBarTitle>
+                Server reachable, but the browser blocked the response (CORS)
+              </MessageBarTitle>
+              <div className={styles.certBlock}>
+                <Text size={200}>
+                  Your API server responded, but didn't allow this add-in's
+                  origin (<code>{origin}</code>). Add these headers to your API
+                  server's responses:
+                </Text>
+                <pre className={styles.certCommand}>
+{`Access-Control-Allow-Origin: ${origin}
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`}
+                </pre>
+                <details>
+                  <summary>nginx snippet</summary>
+                  <pre className={styles.certCommand}>
+{`add_header Access-Control-Allow-Origin  "${origin}" always;
+add_header Access-Control-Allow-Headers "Authorization, Content-Type" always;
+add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS" always;
+if ($request_method = OPTIONS) { return 204; }`}
+                  </pre>
+                </details>
+                <details>
+                  <summary>Apache snippet</summary>
+                  <pre className={styles.certCommand}>
+{`Header always set Access-Control-Allow-Origin  "${origin}"
+Header always set Access-Control-Allow-Headers "Authorization, Content-Type"
+Header always set Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS"
+RewriteEngine On
+RewriteCond %{REQUEST_METHOD} OPTIONS
+RewriteRule ^ - [R=204,L]`}
+                  </pre>
+                </details>
+                <details>
+                  <summary>IIS web.config snippet</summary>
+                  <pre className={styles.certCommand}>
+{`<system.webServer>
+  <httpProtocol>
+    <customHeaders>
+      <add name="Access-Control-Allow-Origin"  value="${origin}" />
+      <add name="Access-Control-Allow-Headers" value="Authorization, Content-Type" />
+      <add name="Access-Control-Allow-Methods" value="GET, POST, PUT, DELETE, OPTIONS" />
+    </customHeaders>
+  </httpProtocol>
+</system.webServer>`}
+                  </pre>
+                </details>
+                <div className={styles.certActions}>
+                  <Button
+                    size="small"
+                    icon={<ArrowClockwise20Regular />}
+                    appearance="primary"
+                    onClick={retryValidate}
+                  >
+                    Retry
+                  </Button>
+                </div>
+                <details>
+                  <summary>Technical details</summary>
+                  <Text size={100} className={styles.hint}>
+                    {validateState.error}
+                  </Text>
+                </details>
               </div>
-              <Text size={100} className={styles.hint}>
-                Original error: {validateState.error}
-              </Text>
-            </div>
-          </MessageBarBody>
-        </MessageBar>
-      )}
+            </MessageBarBody>
+          </MessageBar>
+          );
+        })()}
+
+      {validateState.error &&
+        validateState.failureKind === "network" &&
+        validateState.corsReachable !== true &&
+        validateState.lastTested && (
+          <MessageBar intent="warning">
+            <MessageBarBody>
+              <MessageBarTitle>
+                Couldn't reach{" "}
+                {(() => {
+                  try {
+                    return new URL(validateState.lastTested.apiUrl).hostname;
+                  } catch {
+                    return validateState.lastTested.apiUrl;
+                  }
+                })()}
+              </MessageBarTitle>
+              <div className={styles.certBlock}>
+                <Text size={200}>
+                  {validateState.corsReachable === false
+                    ? "The server didn't respond at all. The most common cause is a self-signed TLS certificate that Windows doesn't trust. Open PowerShell on this machine and run:"
+                    : "This usually means the server's TLS certificate isn't trusted by Windows (also fires on DNS / network failures). Open PowerShell on this machine and run:"}
+                </Text>
+                <pre className={styles.certCommand}>
+                  {buildCertTrustCommand(validateState.lastTested.apiUrl)}
+                </pre>
+                <Text size={200} className={styles.hint}>
+                  The installer reports back whether it imported a cert, found
+                  the host unreachable, or couldn't resolve DNS.
+                </Text>
+                <div className={styles.certActions}>
+                  <Button
+                    size="small"
+                    icon={<Copy20Regular />}
+                    onClick={copyCertTrustCommand}
+                  >
+                    {copied ? "Copied!" : "Copy command"}
+                  </Button>
+                  <Button
+                    size="small"
+                    icon={<ArrowClockwise20Regular />}
+                    appearance="primary"
+                    onClick={retryValidate}
+                  >
+                    Retry
+                  </Button>
+                </div>
+                <details>
+                  <summary>Technical details</summary>
+                  <Text size={100} className={styles.hint}>
+                    {validateState.error}
+                  </Text>
+                </details>
+              </div>
+            </MessageBarBody>
+          </MessageBar>
+        )}
 
       {validateState.validatedId && (
         <MessageBar intent="success">

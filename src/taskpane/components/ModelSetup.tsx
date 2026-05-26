@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   makeStyles,
   tokens,
@@ -139,6 +139,8 @@ interface ModelSetupProps {
   initialVariables?: InputVariable[];
   initialOutcomes?: string[];
   initialModelName?: string;
+  /** Optional slot rendered above the form (e.g. PickExistingBar). */
+  headerSlot?: React.ReactNode;
 }
 
 const INPUT_TYPE_OPTIONS = [
@@ -240,6 +242,7 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
   initialVariables,
   initialOutcomes,
   initialModelName,
+  headerSlot,
 }) => {
   const styles = useStyles();
 
@@ -266,15 +269,25 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
   const [setupStep, setSetupStep] = useState("");
   const [setupProgress, setSetupProgress] = useState<{ current: number; total: number } | null>(null);
 
+  // Synchronous re-entry guard. The async work in loadExample / handleSubmit
+  // takes 1+ second (createModel → createProject → optional sheet build), and
+  // the button-disabled / overlay states only flip after React commits. A
+  // sub-frame double-click on an example card was firing two parallel
+  // createModel+createProject flows. The ref blocks the second call before
+  // React state has a chance to catch up.
+  const inFlightRef = useRef(false);
+
   /**
    * Auto-setup: create model + project via API, build spreadsheet(s) in Excel,
    * then hand off to EvaluateCases so the user can see the sheet and run training.
    */
   const loadExample = async (example: Example) => {
+    if (inFlightRef.current) return;
     if (!client) {
       setError("Not connected to API.");
       return;
     }
+    inFlightRef.current = true;
 
     setSelectedExample(example);
     setShowExamples(false);
@@ -338,6 +351,8 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Example setup failed.");
       setIsAutoSetup(false);
+    } finally {
+      inFlightRef.current = false;
     }
   };
 
@@ -420,6 +435,7 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
   };
 
   const handleSubmit = async () => {
+    if (inFlightRef.current) return;
     const validationError = validate();
     if (validationError) {
       setError(validationError);
@@ -429,12 +445,13 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       setError("Not connected to API.");
       return;
     }
+    inFlightRef.current = true;
 
     setIsSubmitting(true);
     setError(null);
 
     try {
-      const desc = description.trim() || `VSME model: ${modelName.trim()}`;
+      const desc = description.trim() || `GMOO model: ${modelName.trim()}`;
       const paddedDesc = desc.length < 8 ? desc.padEnd(8, " ") : desc;
       const model = await client.createModel(modelName.trim(), paddedDesc);
       // Auto-fill blank names with defaults before sending to the API.
@@ -470,6 +487,7 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       setError(err instanceof Error ? err.message : "Failed to create model.");
     } finally {
       setIsSubmitting(false);
+      inFlightRef.current = false;
     }
   };
 
@@ -509,6 +527,7 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
   // --- Normal form ---
   return (
     <div className={styles.container}>
+      {headerSlot}
       <Text weight="semibold" size={400}>
         Define Model
       </Text>
@@ -561,7 +580,7 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
         <Input
           value={modelName}
           onChange={(_, data) => setModelName(data.value)}
-          placeholder="My VSME Model (min 4 chars)"
+          placeholder="My GMOO Model (min 4 chars)"
         />
         <Text size={200}>Description (optional)</Text>
         <Input

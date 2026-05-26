@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import {
   makeStyles,
+  tokens,
   Button,
   Input,
   Text,
@@ -21,6 +22,7 @@ import type { GmooClient } from "../services/gmooApi";
 import type { EvalConfig } from "../services/excelService";
 import { evaluateCase, readSelectedRangeWithValues } from "../services/excelService";
 import { ObjectiveType } from "../types/gmoo";
+import type { InputVariable } from "../types/workbookState";
 
 const useStyles = makeStyles({
   container: {
@@ -93,12 +95,18 @@ interface ObjectiveSetupProps {
   trialId: number;
   outcomeNames: string[];
   inputCases: number[][];
+  /** Used to synthesize an initial input (per-variable midpoint) when
+   *  inputCases is empty — happens on Resume-from-Trial because the project
+   *  DTO usually omits the training-cases array. */
+  variables: InputVariable[];
   evalConfig: EvalConfig | null;
   initialObjectives?: ObjectiveRowData[];
   /** Default objectives from a loaded example */
   exampleObjectives?: ObjectiveRowData[];
   onComplete: (objectiveId: number, objectiveRows: ObjectiveRowData[]) => void;
   onBack: () => void;
+  /** Optional slot rendered above the body (e.g. PickExistingBar). */
+  headerSlot?: React.ReactNode;
 }
 
 function makeBlankRows(outcomeNames: string[]): ObjectiveRowData[] {
@@ -115,11 +123,13 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
   trialId,
   outcomeNames,
   inputCases,
+  variables,
   evalConfig,
   initialObjectives,
   exampleObjectives,
   onComplete,
   onBack,
+  headerSlot,
 }) => {
   const styles = useStyles();
 
@@ -218,7 +228,23 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
     setError(null);
 
     try {
-      const initialInput = inputCases[initialCaseIndex] ?? inputCases[0];
+      // Prefer a real training case. Fall back to per-variable midpoints when
+      // Resume-from-Trial gave us no inputCases (project DTO omits them) so
+      // the user isn't stuck — the value only seeds the first inverse
+      // iteration; the optimizer takes over from there.
+      const initialInput =
+        inputCases[initialCaseIndex] ??
+        inputCases[0] ??
+        (variables.length > 0
+          ? variables.map((v) => (v.min + v.max) / 2)
+          : null);
+      if (!initialInput) {
+        setError(
+          "No initial input could be derived. Go back and re-define the model's variables."
+        );
+        setIsSubmitting(false);
+        return;
+      }
       const targetValues = objectives.map((o) => parseFloat(o.target) || 0);
 
       // Evaluate the initial input case through Excel to get real outputs
@@ -227,7 +253,6 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
       if (evalConfig) {
         const evalResult = await evaluateCase(evalConfig, initialInput);
         initialOutput = evalResult.outputs;
-        console.log("[ObjectiveSetup] Evaluated initial case outputs:", initialOutput);
       } else {
         // Fallback: zeros (not target values — that causes the API to mark objective as satisfied)
         initialOutput = new Array(outcomeNames.length).fill(0);
@@ -254,6 +279,7 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
 
   return (
     <div className={styles.container}>
+      {headerSlot}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
         <Text weight="semibold" size={400}>
           Set Objectives
@@ -359,12 +385,18 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
         </MessageBar>
       )}
 
+      <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+        Submitting creates a new optimization run against this trial. Existing
+        objectives in this trial aren't modified — you can switch back to them
+        from the dropdown above.
+      </Text>
+
       <div className={styles.buttonRow}>
         <Button appearance="secondary" onClick={onBack}>
           Back
         </Button>
         <Button appearance="primary" onClick={handleSubmit} disabled={isSubmitting}>
-          {isSubmitting ? <Spinner size="tiny" /> : "Set Objectives & Continue"}
+          {isSubmitting ? <Spinner size="tiny" /> : "Submit Objectives & Start Optimization"}
         </Button>
       </div>
     </div>

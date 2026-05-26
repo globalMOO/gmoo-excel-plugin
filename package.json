@@ -1,7 +1,7 @@
 {
-  "name": "vsme-globalmoo-excel-addin",
+  "name": "gmoo-globalmoo-excel-addin",
   "version": "1.0.0",
-  "description": "VSME - globalMOO Office Web Add-in for Excel",
+  "description": "GMOO - globalMOO Office Web Add-in for Excel",
   "private": true,
   "scripts": {
     "prebuild": "node prebuild.js",
