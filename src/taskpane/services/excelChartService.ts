@@ -68,11 +68,23 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
 
     await context.sync();
 
-    // --- Chart layout: stacked vertically with generous spacing ---
+    // --- Chart layout: absolute geometry (points) so charts never overlap ---
+    // Row-offset positioning is fragile (chart height in px vs. variable row
+    // heights), which let stacked charts collide. Anchor each chart at an
+    // explicit top/left instead.
     const chartWidth = 600;
     const chartHeight = 300;
-    const rowsPerChart = 22; // ~300px ≈ 22 rows at default row height
-    let chartRow = n + 4;
+    const chartGap = 30;
+    const baseTop = (n + 4) * 15; // ~15pt default row height, below the data
+    const chartLeft = 12;
+    const topFor = (index: number) => baseTop + index * (chartHeight + chartGap);
+
+    const placeChart = (chart: Excel.Chart, index: number) => {
+      chart.top = topFor(index);
+      chart.left = chartLeft;
+      chart.height = chartHeight;
+      chart.width = chartWidth;
+    };
 
     // --- Error Convergence Chart ---
     const errorChart = sheet.charts.add(
@@ -81,17 +93,13 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
       Excel.ChartSeriesBy.columns
     );
     errorChart.title.text = "Error Convergence (L1 Norm)";
-    errorChart.setPosition("A" + chartRow);
-    errorChart.height = chartHeight;
-    errorChart.width = chartWidth;
+    placeChart(errorChart, 0);
     try { errorChart.series.getItemAt(0).setXAxisValues(sheet.getRange(`A2:A${n + 1}`)); } catch (_) { /* ignore */ }
     const allPositive = iterations.every((inv) => (inv.l1Norm ?? 0) > 0);
     if (allPositive) {
       try { errorChart.axes.getItem(Excel.ChartAxisType.value).logBase = 10; } catch (_) { /* not supported */ }
     }
     try { errorChart.legend.visible = false; } catch (_) { /* ignore */ }
-
-    chartRow += rowsPerChart;
 
     // --- Input Variable Convergence Chart ---
     const inputDataStart = getColLetter(inputStartCol + 1); // E
@@ -102,12 +110,8 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
       Excel.ChartSeriesBy.columns
     );
     inputChart.title.text = "Input Variable Convergence";
-    inputChart.setPosition("A" + chartRow);
-    inputChart.height = chartHeight;
-    inputChart.width = chartWidth;
+    placeChart(inputChart, 1);
     try { inputChart.series.getItemAt(0).setXAxisValues(sheet.getRange(`D2:D${n + 1}`)); } catch (_) { /* ignore */ }
-
-    chartRow += rowsPerChart;
 
     // --- Outcome Convergence Chart ---
     const outcomeDataStart = getColLetter(outcomeIterCol + 1);
@@ -118,9 +122,7 @@ export async function createResultsCharts(data: ChartData): Promise<void> {
       Excel.ChartSeriesBy.columns
     );
     outcomeChart.title.text = "Outcome Convergence";
-    outcomeChart.setPosition("A" + chartRow);
-    outcomeChart.height = chartHeight;
-    outcomeChart.width = chartWidth;
+    placeChart(outcomeChart, 2);
     try { outcomeChart.series.getItemAt(0).setXAxisValues(sheet.getRange(`${outcomeIterLetter}2:${outcomeIterLetter}${n + 1}`)); } catch (_) { /* ignore */ }
 
     sheet.activate();
@@ -282,6 +284,16 @@ export async function createMultiSolveRadarCharts(
 
     await context.sync();
 
+    // --- Chart geometry (points) ---
+    // Anchor both radars below the last reference table using explicit top/left
+    // so they sit side by side and never overlap. Row-offset positioning let the
+    // 360px-tall charts collide because chart height (px) ≠ variable row heights.
+    const lastTableRow = normOutputHeaderRow + 1 + nOut;
+    const chartTop = (lastTableRow + 2) * 15; // ~15pt default row height
+    const chartHeight = 360;
+    const chartWidth = 500;
+    const chartGap = 24;
+
     // --- Inputs radar chart (raw values) ---
     const inputDataRange = sheet.getRange(
       `A1:${getColLetter(1 + nSol)}${1 + nIn}`
@@ -292,9 +304,10 @@ export async function createMultiSolveRadarCharts(
       Excel.ChartSeriesBy.columns
     );
     inputChart.title.text = "Multi-Solve Inputs (native units)";
-    inputChart.setPosition(`A${normOutputHeaderRow + nOut + 3}`);
-    inputChart.height = 360;
-    inputChart.width = 500;
+    inputChart.top = chartTop;
+    inputChart.left = 12;
+    inputChart.height = chartHeight;
+    inputChart.width = chartWidth;
 
     // --- Outputs radar chart (raw values) ---
     const outputDataRange = sheet.getRange(
@@ -306,9 +319,10 @@ export async function createMultiSolveRadarCharts(
       Excel.ChartSeriesBy.columns
     );
     outputChart.title.text = "Multi-Solve Outputs (native units)";
-    outputChart.setPosition(`A${normOutputHeaderRow + nOut + 3 + 20}`);
-    outputChart.height = 360;
-    outputChart.width = 500;
+    outputChart.top = chartTop;
+    outputChart.left = 12 + chartWidth + chartGap;
+    outputChart.height = chartHeight;
+    outputChart.width = chartWidth;
 
     sheet.activate();
     await context.sync();
