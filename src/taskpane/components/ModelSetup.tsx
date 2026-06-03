@@ -59,11 +59,6 @@ const useStyles = makeStyles({
     justifyContent: "space-between",
     marginTop: "12px",
   },
-  outcomeRow: {
-    display: "flex",
-    gap: "8px",
-    alignItems: "center",
-  },
   exampleToggle: {
     display: "flex",
     alignItems: "center",
@@ -124,7 +119,9 @@ export interface ModelSetupCompleteData {
   projectId: number;
   modelName: string;
   inputVariables: InputVariable[];
-  outcomeNames: string[];
+  /** Only carried by the example auto-setup path (examples know their outcomes).
+   *  The manual flow defines outcomes on the Evaluate Cases step. */
+  outcomeNames?: string[];
   inputCases: number[][];
   selectedExample?: Example;
   /** Present when an example ran the full auto-setup pipeline */
@@ -137,17 +134,16 @@ interface ModelSetupProps {
   onComplete: (data: ModelSetupCompleteData) => void;
   onBack: () => void;
   initialVariables?: InputVariable[];
-  initialOutcomes?: string[];
   initialModelName?: string;
   /** Optional slot rendered above the form (e.g. PickExistingBar). */
   headerSlot?: React.ReactNode;
 }
 
+// Boolean and Category inputs are intentionally not offered yet — they need a
+// categories editor and integer-domain handling we don't support in this UI.
 const INPUT_TYPE_OPTIONS = [
   { value: InputType.Float, label: "Float" },
   { value: InputType.Integer, label: "Integer" },
-  { value: InputType.Boolean, label: "Boolean" },
-  { value: InputType.Category, label: "Category" },
 ];
 
 // Local editing state uses strings for min/max so typing "-1" works naturally
@@ -185,9 +181,7 @@ function parseInputType(raw: unknown): string | null {
   if (s === "float" || s === "f" || s === "real" || s === "number" || s === "continuous")
     return InputType.Float;
   if (s === "integer" || s === "int" || s === "i") return InputType.Integer;
-  if (s === "boolean" || s === "bool" || s === "b") return InputType.Boolean;
-  if (s === "category" || s === "categorical" || s === "cat" || s === "c")
-    return InputType.Category;
+  // Boolean/Category aren't offered in this UI; anything else falls back to Float.
   return null;
 }
 
@@ -221,26 +215,11 @@ function parseVariablesFromRange(values: unknown[][]): VariableRow[] {
   return rows;
 }
 
-/** Parse a 2-D values array into outcome names (first column, blank rows skipped). */
-function parseOutcomesFromRange(values: unknown[][]): string[] {
-  const names: string[] = [];
-  for (let i = 0; i < values.length; i++) {
-    const row = values[i] ?? [];
-    const cell = row[0];
-    if (cell === null || cell === undefined) continue;
-    const s = String(cell).trim();
-    if (!s) continue;
-    names.push(s);
-  }
-  return names;
-}
-
 export const ModelSetup: React.FC<ModelSetupProps> = ({
   client,
   onComplete,
   onBack,
   initialVariables,
-  initialOutcomes,
   initialModelName,
   headerSlot,
 }) => {
@@ -255,9 +234,6 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
       { name: "", type: InputType.Float, min: "0", max: "1" },
       { name: "", type: InputType.Float, min: "0", max: "1" },
     ]
-  );
-  const [outcomeNames, setOutcomeNames] = useState<string[]>(
-    initialOutcomes ?? [""]
   );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -373,10 +349,6 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
     );
   };
 
-  const addOutcome = () => {
-    setOutcomeNames([...outcomeNames, ""]);
-  };
-
   const loadVariablesFromSelection = async () => {
     setError(null);
     try {
@@ -396,41 +368,20 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
     }
   };
 
-  const loadOutcomesFromSelection = async () => {
-    setError(null);
-    try {
-      const { values } = await readSelectedRangeWithValues();
-      const parsed = parseOutcomesFromRange(values);
-      if (parsed.length === 0) {
-        setError("No non-empty outcome names found in the selected range.");
-        return;
-      }
-      setOutcomeNames(parsed);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to read selected range.");
-    }
-  };
-
-  const removeOutcome = (index: number) => {
-    if (outcomeNames.length <= 1) return;
-    setOutcomeNames(outcomeNames.filter((_, i) => i !== index));
-  };
-
   const validate = (): string | null => {
     if (!modelName.trim()) return "Model name is required.";
     if (modelName.trim().length < 4) return "Model name must be at least 4 characters.";
     if (variables.length < 2) return "At least 2 input variables are required.";
     for (let i = 0; i < variables.length; i++) {
-      // Empty names auto-fill to "Var N" / "Outcome N" at submit time, no error here.
-      const t = variables[i].type;
+      // Empty names auto-fill to "Var N" at submit time, no error here.
+      // Only Float/Integer inputs are supported, both of which need min < max.
       const minVal = parseFloat(variables[i].min);
       const maxVal = parseFloat(variables[i].max);
-      if (t !== "boolean" && t !== "category" && (isNaN(minVal) || isNaN(maxVal) || minVal >= maxVal)) {
+      if (isNaN(minVal) || isNaN(maxVal) || minVal >= maxVal) {
         const displayName = variables[i].name.trim() || `Var ${i + 1}`;
         return `Variable "${displayName}": min must be less than max.`;
       }
     }
-    if (outcomeNames.length === 0) return "At least one outcome is required.";
     return null;
   };
 
@@ -470,16 +421,11 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
         inputVars.flatMap((v) => v.categories ?? [])
       );
 
-      const filledOutcomeNames = outcomeNames.map(
-        (n, i) => n.trim() || `Outcome ${i + 1}`
-      );
-
       onComplete({
         modelId: model.id,
         projectId: project.id,
         modelName: modelName.trim(),
         inputVariables: inputVars,
-        outcomeNames: filledOutcomeNames,
         inputCases: project.inputCases,
         selectedExample: selectedExample ?? undefined,
       });
@@ -684,52 +630,10 @@ export const ModelSetup: React.FC<ModelSetupProps> = ({
         </Button>
       </div>
 
-      <div className={styles.section}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-          <Text weight="semibold" size={300}>
-            Outcomes
-          </Text>
-          <Button
-            icon={<CursorClick20Regular />}
-            size="small"
-            appearance="subtle"
-            onClick={loadOutcomesFromSelection}
-            title="Populate outcome names from the currently-selected cells (single column; any sheet or workbook)."
-          >
-            Load from selection
-          </Button>
-        </div>
-        {outcomeNames.map((name, i) => (
-          <div key={i} className={styles.outcomeRow}>
-            <Input
-              size="small"
-              value={name}
-              onChange={(_, data) => {
-                const updated = [...outcomeNames];
-                updated[i] = data.value;
-                setOutcomeNames(updated);
-              }}
-              placeholder={`Outcome ${i + 1}`}
-              style={{ flexGrow: 1 }}
-            />
-            <Button
-              icon={<Delete20Regular />}
-              size="small"
-              appearance="subtle"
-              onClick={() => removeOutcome(i)}
-              disabled={outcomeNames.length <= 1}
-            />
-          </div>
-        ))}
-        <Button
-          icon={<Add20Regular />}
-          size="small"
-          appearance="subtle"
-          onClick={addOutcome}
-        >
-          Add Outcome
-        </Button>
-      </div>
+      <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+        You'll define this model's outcomes (outputs) on the next step, when you build
+        or wire up the evaluation sheet.
+      </Text>
 
       {error && (
         <MessageBar intent="error">

@@ -30,6 +30,7 @@ import type { Project, Trial } from "./types/gmoo";
 import { ObjectiveType } from "./types/gmoo";
 import type { EvalConfig, GmooStateData } from "./services/excelService";
 import { loadStateSheet } from "./services/excelService";
+import { resolveResumeNames } from "./services/resumeNames";
 import type { InputVariable } from "./types/workbookState";
 import type { ObjectiveRowData } from "./components/ObjectiveSetup";
 import type { Example } from "./examples";
@@ -347,6 +348,26 @@ const App: React.FC = () => {
 
   const optimization = useOptimization(client, state.objectiveId, evalConfig);
 
+  /**
+   * Recover the input cases for the active project so the user can evaluate and
+   * create a *new* trial after a Resume-from-Project landed with no cases (the
+   * project DTO omits the large inputCases array). Non-destructive: it only
+   * re-reads the project's fixed DOE from the model tree and stores it; the new
+   * trial is created later by CaseEvaluation's existing flow, which never
+   * modifies prior trials. Returns false when the cases truly aren't available
+   * from the API (nothing we can fabricate — the DOE is fixed at creation).
+   */
+  const reloadProjectInputCases = useCallback(async (): Promise<boolean> => {
+    if (!client || !state.modelId || !state.projectId) return false;
+    const model = await client.getModel(state.modelId);
+    const proj = model.projects?.find((p) => p.id === state.projectId);
+    if (proj && Array.isArray(proj.inputCases) && proj.inputCases.length > 0) {
+      await updateState({ inputCases: proj.inputCases });
+      return true;
+    }
+    return false;
+  }, [client, state.modelId, state.projectId, updateState]);
+
   const goToStep = useCallback(
     (step: WizardStep) => {
       updateState({ wizardStep: step });
@@ -386,20 +407,7 @@ const App: React.FC = () => {
         }
       }
 
-      // Preserve user-edited names on same-project resume. The API doesn't
-      // store variable names (they live only in workbook state / _GMOO_State),
-      // so a fresh synthetic `Input N` would overwrite anything the user
-      // renamed. Cross-project resume has no carry-over to preserve.
       const sameProject = project.id === state.projectId;
-      const inputVariables = project.minimums.map((min, i) => {
-        const existing = sameProject ? state.inputVariables[i] : undefined;
-        return {
-          name: existing?.name ?? `Input ${i + 1}`,
-          type: project.inputTypes[i] ?? existing?.type ?? "float",
-          min,
-          max: project.maximums[i] ?? min + 1,
-        };
-      });
 
       const trial: Trial | undefined =
         selection.trial ??
@@ -407,14 +415,44 @@ const App: React.FC = () => {
           ? project.trials.find((t) => t.id === selection.trialId)
           : undefined);
 
-      // Same logic for outcome names — keep user-renamed labels when staying
-      // within the same project (outputs are project-scoped at the user level
-      // even though the API counts them per-trial).
-      const outcomeNames = trial
-        ? Array.from({ length: trial.outputCount }, (_, i) =>
-            sameProject ? state.outcomeNames[i] ?? `Outcome ${i + 1}` : `Outcome ${i + 1}`
-          )
-        : [];
+      // Recover user-facing names. The API stores only counts/bounds/types, so
+      // names come from in-state (same-project) or the _GMOO_State sheet. The
+      // sheet's names are trusted only when it describes *this* project (matching
+      // projectId tag, or untagged legacy) and the counts line up — otherwise a
+      // different project's labels could leak in. Without this, a resume falls
+      // back to "Input N"/"Outcome N" which then show in the template and charts.
+      const outputCount = trial?.outputCount ?? 0;
+      const savedMatchesProject =
+        !!savedStateData &&
+        (savedStateData.projectId == null || savedStateData.projectId === project.id);
+      const savedVariableNames =
+        savedMatchesProject && savedStateData!.variables.length === project.minimums.length
+          ? savedStateData!.variables.map((v) => v.name)
+          : undefined;
+      const savedOutcomeNames =
+        savedMatchesProject && savedStateData!.outcomes.length === outputCount
+          ? savedStateData!.outcomes.map((o) => o.name)
+          : undefined;
+
+      const { inputNames, outcomeNames } = resolveResumeNames({
+        inputCount: project.minimums.length,
+        outputCount,
+        sameProject,
+        stateInputNames: state.inputVariables.map((v) => v.name),
+        stateOutcomeNames: state.outcomeNames,
+        savedVariableNames,
+        savedOutcomeNames,
+      });
+
+      const inputVariables = project.minimums.map((min, i) => {
+        const existing = sameProject ? state.inputVariables[i] : undefined;
+        return {
+          name: inputNames[i],
+          type: project.inputTypes[i] ?? existing?.type ?? "float",
+          min,
+          max: project.maximums[i] ?? min + 1,
+        };
+      });
 
       // Only overwrite modelId when the selection actually carries one
       // (project-mode PickExistingBar / ResumePicker). Trial- and objective-
@@ -456,7 +494,16 @@ const App: React.FC = () => {
       }
       await updateState(patch);
     },
-    [client, updateState, state.projectId, state.trialId]
+    [
+      client,
+      updateState,
+      state.projectId,
+      state.trialId,
+      state.inputVariables,
+      state.outcomeNames,
+      state.modelId,
+      savedStateData,
+    ]
   );
 
   if (isLoadingConnections || !isStateLoaded) {
@@ -548,11 +595,6 @@ const App: React.FC = () => {
                     name: v.name, type: v.type, min: v.min, max: v.max,
                   }))
             }
-            initialOutcomes={
-              state.outcomeNames.length > 0
-                ? state.outcomeNames
-                : savedStateData?.outcomes.map((o) => o.name)
-            }
             onComplete={(data) => {
               setSavedObjectives(null);
               setSelectedExample(data.selectedExample ?? null);
@@ -568,7 +610,11 @@ const App: React.FC = () => {
                 projectId: data.projectId,
                 modelName: data.modelName,
                 inputVariables: data.inputVariables,
-                outcomeNames: data.outcomeNames,
+                // Outcomes are defined on the Evaluate Cases step now; only the
+                // example auto-setup path supplies them here. Manual flow seeds
+                // the editor empty. Prefer any names already in state (e.g. when
+                // re-defining after Back nav) so they aren't blown away.
+                outcomeNames: data.outcomeNames ?? state.outcomeNames,
                 inputCases: data.inputCases,
                 wizardStep: WizardStep.EvaluateCases,
               });
@@ -591,10 +637,11 @@ const App: React.FC = () => {
             modelName={state.modelName}
             projectId={state.projectId!}
             variables={state.inputVariables}
-            outcomeNames={state.outcomeNames}
+            initialOutcomeNames={state.outcomeNames}
             inputCases={state.inputCases ?? []}
             formulas={selectedExample?.setup.formulas}
             initialEvalConfig={evalConfig ?? undefined}
+            onReloadInputCases={reloadProjectInputCases}
             headerSlot={
               <PickExistingBar
                 mode="trial"
@@ -606,10 +653,14 @@ const App: React.FC = () => {
                 onPick={(sel, jumpTo) => void handleResume(sel, jumpTo)}
               />
             }
-            onComplete={(trialId, config) => {
+            onComplete={(trialId, config, outcomeNames) => {
               setEvalConfig(config);
               updateState({
                 trialId,
+                // Outcomes are finalized on this step now — persist the names
+                // the user committed so SetObjectives / Results / Multi-Solve
+                // and the charts all use the real labels.
+                outcomeNames,
                 // Coerce undefined → null so the persisted shape is consistent
                 // (EvalConfig.sheetName is undefined in non-contiguous mode;
                 // WorkbookState types it as string | null).
