@@ -3,6 +3,7 @@ import {
   makeStyles,
   tokens,
   Button,
+  Input,
   Text,
   Spinner,
   MessageBar,
@@ -20,11 +21,25 @@ import {
   TableCell,
   Badge,
 } from "@fluentui/react-components";
-import { CursorClick20Regular } from "@fluentui/react-icons";
+import { CursorClick20Regular, Add20Regular, Delete20Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { InputVariable } from "../types/workbookState";
 import type { EvalConfig } from "../services/excelService";
-import { createTemplateSheet, evaluateAllCases, readSelectedRange, loadStateSheet, saveStateSheet, type GmooStateData } from "../services/excelService";
+import { createTemplateSheet, evaluateAllCases, readSelectedRange, readSelectedRangeWithValues, readSelectedCellAddresses, loadStateSheet, saveStateSheet, type GmooStateData } from "../services/excelService";
+
+/** Parse a 2-D values array into outcome names (first column, blank rows skipped). */
+function parseOutcomesFromRange(values: unknown[][]): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i] ?? [];
+    const cell = row[0];
+    if (cell === null || cell === undefined) continue;
+    const s = String(cell).trim();
+    if (!s) continue;
+    names.push(s);
+  }
+  return names;
+}
 
 const useStyles = makeStyles({
   container: {
@@ -63,14 +78,20 @@ interface CaseEvaluationProps {
   modelName: string;
   projectId: number;
   variables: InputVariable[];
-  outcomeNames: string[];
+  /** Seed for the editable Outcomes list (example/resume) — empty for a fresh
+   *  manual flow, where the user now defines outcomes here at the Evaluate step. */
+  initialOutcomeNames: string[];
   inputCases: number[][];
   /** Optional formulas from a loaded example, keyed by outcome name */
   formulas?: Record<string, string>;
   /** Pre-built eval config from example auto-setup (sheet already exists) */
   initialEvalConfig?: EvalConfig;
-  onComplete: (trialId: number, evalConfig: EvalConfig) => void;
+  onComplete: (trialId: number, evalConfig: EvalConfig, outcomeNames: string[]) => void;
   onBack: () => void;
+  /** Recover the project's DOE input cases (Resume-from-Project lands with none)
+   *  so the user can evaluate and create a new trial. Resolves false when the
+   *  API doesn't carry them. */
+  onReloadInputCases?: () => Promise<boolean>;
   /** Optional slot rendered above the body (e.g. PickExistingBar). */
   headerSlot?: React.ReactNode;
 }
@@ -80,15 +101,22 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
   modelName,
   projectId,
   variables,
-  outcomeNames,
+  initialOutcomeNames,
   inputCases,
   formulas,
   initialEvalConfig,
   onComplete,
   onBack,
+  onReloadInputCases,
   headerSlot,
 }) => {
   const styles = useStyles();
+
+  // Outcomes are defined here (not at Define Model) — the API only needs them
+  // at training time (loadOutputCases). Seed from example/resume, else one blank.
+  const [outcomeNames, setOutcomeNames] = useState<string[]>(
+    () => (initialOutcomeNames.length > 0 ? initialOutcomeNames : [""])
+  );
 
   const [mode, setMode] = useState<"template" | "existing">(
     initialEvalConfig?.inputCells ? "existing" : "template"
@@ -110,6 +138,29 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
   const [isPicking, setIsPicking] = useState<string | null>(null); // "input-0", "output-2", etc.
   const [stateLoaded, setStateLoaded] = useState(false);
   const [isLoadingState, setIsLoadingState] = useState(false);
+  // Recovery from the "no input cases" dead-end (Resume-from-Project).
+  const [isReloadingCases, setIsReloadingCases] = useState(false);
+  const [reloadError, setReloadError] = useState<string | null>(null);
+
+  const handleReloadInputCases = async () => {
+    if (!onReloadInputCases) return;
+    setIsReloadingCases(true);
+    setReloadError(null);
+    try {
+      const ok = await onReloadInputCases();
+      if (!ok) {
+        setReloadError(
+          "This project's input cases aren't available from the API (the DOE is fixed when a project is created and isn't returned on reload). Use \"Switch trial\" above to pick an already-trained trial, or start a new model."
+        );
+      }
+      // On success the parent updates inputCases; this view re-renders into the
+      // normal evaluation flow automatically.
+    } catch (err) {
+      setReloadError(err instanceof Error ? err.message : "Failed to reload input cases.");
+    } finally {
+      setIsReloadingCases(false);
+    }
+  };
 
   // Auto-detect _GMOO_State sheet when switching to "existing" mode
   useEffect(() => {
@@ -156,6 +207,49 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     return () => { cancelled = true; };
   }, [mode, sheetCreated, stateLoaded, initialEvalConfig, variables, outcomeNames, projectId]);
 
+  // Keep the existing-sheet output cell map sized to the editable outcome list,
+  // preserving already-picked cells when the user adds/removes rows.
+  useEffect(() => {
+    setOutputCellMap((prev) => {
+      if (prev.length === outcomeNames.length) return prev;
+      const next = new Array(outcomeNames.length).fill("");
+      for (let i = 0; i < Math.min(prev.length, next.length); i++) next[i] = prev[i];
+      return next;
+    });
+  }, [outcomeNames.length]);
+
+  // Blank outcome names auto-fill to "Outcome N" at commit time, mirroring the
+  // old Define-Model behavior. The editor itself shows the raw (possibly blank)
+  // names with placeholders.
+  const filledOutcomeNames = outcomeNames.map((n, i) => n.trim() || `Outcome ${i + 1}`);
+
+  const addOutcome = () => setOutcomeNames([...outcomeNames, ""]);
+  const removeOutcome = (index: number) => {
+    if (outcomeNames.length <= 1) return;
+    setOutcomeNames(outcomeNames.filter((_, i) => i !== index));
+  };
+  const updateOutcome = (index: number, value: string) => {
+    setOutcomeNames(outcomeNames.map((n, i) => (i === index ? value : n)));
+  };
+  const loadOutcomesFromSelection = async () => {
+    setError(null);
+    try {
+      const { values } = await readSelectedRangeWithValues();
+      const parsed = parseOutcomesFromRange(values);
+      if (parsed.length === 0) {
+        setError("No non-empty outcome names found in the selected range.");
+        return;
+      }
+      setOutcomeNames(parsed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read selected range.");
+    }
+  };
+
+  // Outcomes feed the template build, training, and cell mapping — lock the
+  // editor once those have happened so the committed names can't drift.
+  const outcomesLocked = sheetCreated || !!initialEvalConfig;
+
   const handleCreateTemplate = async () => {
     setIsCreatingSheet(true);
     setError(null);
@@ -164,7 +258,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       const config = await createTemplateSheet({
         modelName,
         variables,
-        outcomeNames,
+        outcomeNames: filledOutcomeNames,
         sheetName,
         formulas,
       });
@@ -202,6 +296,30 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     }
   };
 
+  // Bulk-map: take the user's current rectangular selection and assign its
+  // cells, in row-major order, to all inputs (or all outcomes) at once. The
+  // count must match exactly so cells line up with variables/outcomes in order.
+  const handleLoadAllFromSelection = async (type: "input" | "output") => {
+    setError(null);
+    const expected = type === "input" ? variables.length : filledOutcomeNames.length;
+    try {
+      const addresses = await readSelectedCellAddresses();
+      if (addresses.length !== expected) {
+        setError(
+          `Selected ${addresses.length} cell(s) but there ${expected === 1 ? "is" : "are"} ${expected} ${type === "input" ? "input" : "outcome"}${expected === 1 ? "" : "s"}. Select exactly one cell per ${type === "input" ? "input, in input order" : "outcome, in outcome order"}.`
+        );
+        return;
+      }
+      if (type === "input") {
+        setInputCellMap(addresses);
+      } else {
+        setOutputCellMap(addresses);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to read selected range.");
+    }
+  };
+
   const handleConfirmExisting = () => {
     const missingInputs = inputCellMap.filter((c) => !c.trim());
     const missingOutputs = outputCellMap.filter((c) => !c.trim());
@@ -214,7 +332,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
 
     const config: EvalConfig = {
       variableCount: variables.length,
-      outcomeCount: outcomeNames.length,
+      outcomeCount: filledOutcomeNames.length,
       inputCells: inputCellMap.map((c) => c.trim()),
       outputCells: outputCellMap.map((c) => c.trim()),
     };
@@ -244,7 +362,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       // Submit output cases to API
       const trial = await client.loadOutputCases(
         projectId,
-        outcomeNames.length,
+        filledOutcomeNames.length,
         outputCases
       );
 
@@ -267,7 +385,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
             max: v.max,
             inputCell: inputCells[i],
           })),
-          outcomes: outcomeNames.map((name, i) => ({
+          outcomes: filledOutcomeNames.map((name, i) => ({
             name,
             outputCell: outputCells[i],
           })),
@@ -277,7 +395,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         console.warn("[GMOO] Failed to save state sheet");
       }
 
-      onComplete(trial.id, evalConfig);
+      onComplete(trial.id, evalConfig, filledOutcomeNames);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Evaluation failed.");
     } finally {
@@ -307,26 +425,39 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
           <MessageBarBody>
             <MessageBarTitle>No input cases loaded</MessageBarTitle>
             This project doesn&apos;t carry its input cases in the resume payload.
-            Use the &quot;Switch trial&quot; selector above to pick a trial that&apos;s already
-            been trained, or go back and start a new project from scratch.
+            You can start a new trial by reloading the project&apos;s input cases and
+            re-evaluating them (this creates a fresh trial and won&apos;t modify any
+            existing trial), use the &quot;Switch trial&quot; selector above to pick a
+            trial that&apos;s already been trained, or go back and start a new project.
           </MessageBarBody>
         </MessageBar>
+        {reloadError && (
+          <MessageBar intent="error">
+            <MessageBarBody>{reloadError}</MessageBarBody>
+          </MessageBar>
+        )}
         <div className={styles.buttonRow}>
           <Button appearance="secondary" onClick={onBack}>
             Back
           </Button>
+          {onReloadInputCases && (
+            <Button
+              appearance="primary"
+              onClick={handleReloadInputCases}
+              disabled={isReloadingCases}
+            >
+              {isReloadingCases ? <Spinner size="tiny" /> : "Start a new trial (reload input cases)"}
+            </Button>
+          )}
         </div>
       </div>
     );
   }
 
-  // Same defensive bail when the model has no outcomes defined. This shows up
-  // after a Resume-from-Project where the project has no trial yet (so the
-  // App couldn't infer outputCount), or when an older workbook's state file
-  // was loaded with an empty outcomeNames array. Without this guard the user
-  // sees an empty Outputs table, a vacuously-true "all mapped" badge, and a
-  // 400 from the API on submit.
-  if (outcomeNames.length === 0 || variables.length === 0) {
+  // Defensive bail when the model has no input variables. Outcomes are now
+  // defined on this step, so an empty outcome list is the normal starting state
+  // and is handled by the editor below — only missing inputs is a broken state.
+  if (variables.length === 0) {
     return (
       <div className={styles.container}>
         {headerSlot}
@@ -336,9 +467,8 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         <MessageBar intent="warning">
           <MessageBarBody>
             <MessageBarTitle>Model definition is incomplete</MessageBarTitle>
-            This project has {variables.length} input{variables.length === 1 ? "" : "s"} and{" "}
-            {outcomeNames.length} outcome{outcomeNames.length === 1 ? "" : "s"} defined in
-            this workbook. Go back to Define Model to set them up before evaluating cases.
+            This project has no input variables defined in this workbook. Go back to
+            Define Model to set them up before evaluating cases.
           </MessageBarBody>
         </MessageBar>
         <div className={styles.buttonRow}>
@@ -360,6 +490,59 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         The API generated {inputCases.length} input cases. Your Excel formulas will compute
         the outputs for each case to train the model.
       </Text>
+
+      {/* Outcomes editor — outcomes are defined here (the API only needs them at
+          training time). Locked once a template is built or cells are mapped. */}
+      <Card>
+        <div style={{ padding: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+            <Text weight="semibold" size={300}>Outcomes</Text>
+            <Button
+              icon={<CursorClick20Regular />}
+              size="small"
+              appearance="subtle"
+              onClick={loadOutcomesFromSelection}
+              disabled={outcomesLocked}
+              title="Populate outcome names from the currently-selected cells (single column; any sheet or workbook)."
+            >
+              Load from selection
+            </Button>
+          </div>
+          <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+            Name each model output you want to train and optimize against.
+          </Text>
+          {outcomeNames.map((name, i) => (
+            <div key={i} style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <Input
+                size="small"
+                value={name}
+                onChange={(_, data) => updateOutcome(i, data.value)}
+                placeholder={`Outcome ${i + 1}`}
+                disabled={outcomesLocked}
+                style={{ flexGrow: 1 }}
+              />
+              <Button
+                icon={<Delete20Regular />}
+                size="small"
+                appearance="subtle"
+                onClick={() => removeOutcome(i)}
+                disabled={outcomesLocked || outcomeNames.length <= 1}
+              />
+            </div>
+          ))}
+          {!outcomesLocked && (
+            <Button
+              icon={<Add20Regular />}
+              size="small"
+              appearance="subtle"
+              onClick={addOutcome}
+              style={{ alignSelf: "flex-start" }}
+            >
+              Add Outcome
+            </Button>
+          )}
+        </div>
+      </Card>
 
       <RadioGroup
         value={mode}
@@ -388,8 +571,9 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         <MessageBar intent="success">
           <MessageBarBody>
             <MessageBarTitle>Template Created</MessageBarTitle>
-            Fill in your outcome formulas in column B (rows 11+), referencing the Current Value
-            cells in row 7. Then click "Evaluate Cases & Create New Trial".
+            Fill in your outcome formulas in the green Formula cells (column B), referencing
+            the blue Current Value cells (column D). The Reference column shows each formula's
+            text so you can verify the wiring. Then click "Evaluate Cases & Create New Trial".
           </MessageBarBody>
         </MessageBar>
       )}
@@ -408,12 +592,25 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
                 </MessageBarBody>
               </MessageBar>
             )}
-            <Text weight="semibold" size={300}>
-              Map Input Variables
-            </Text>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+              <Text weight="semibold" size={300}>
+                Map Input Variables
+              </Text>
+              <Button
+                icon={<CursorClick20Regular />}
+                size="small"
+                appearance="subtle"
+                onClick={() => handleLoadAllFromSelection("input")}
+                disabled={isPicking !== null}
+                title={`Select a contiguous range of ${variables.length} cell(s) — one per input, in order — then click to map them all at once.`}
+              >
+                Map all from selection
+              </Button>
+            </div>
             <Text size={200}>
-              For each input, select the cell where the add-in should write values.
-              Cells can be on different sheets.
+              Pick each cell individually below, or select a range of {variables.length} cell
+              {variables.length === 1 ? "" : "s"} (one per input, in order) and use
+              "Map all from selection". Cells can be on different sheets.
             </Text>
             <Table size="extra-small">
               <TableHeader>
@@ -457,11 +654,25 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
               </Badge>
             )}
 
-            <Text weight="semibold" size={300} style={{ marginTop: "8px" }}>
-              Map Outcomes
-            </Text>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "8px" }}>
+              <Text weight="semibold" size={300}>
+                Map Outcomes
+              </Text>
+              <Button
+                icon={<CursorClick20Regular />}
+                size="small"
+                appearance="subtle"
+                onClick={() => handleLoadAllFromSelection("output")}
+                disabled={isPicking !== null}
+                title={`Select a contiguous range of ${filledOutcomeNames.length} cell(s) — one per outcome, in order — then click to map them all at once.`}
+              >
+                Map all from selection
+              </Button>
+            </div>
             <Text size={200}>
-              For each outcome, select the cell containing the formula result.
+              Pick each cell individually below, or select a range of {filledOutcomeNames.length} cell
+              {filledOutcomeNames.length === 1 ? "" : "s"} (one per outcome, in order) and use
+              "Map all from selection".
             </Text>
             <Table size="extra-small">
               <TableHeader>
@@ -472,7 +683,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {outcomeNames.map((name, i) => (
+                {filledOutcomeNames.map((name, i) => (
                   <TableRow key={`output-${i}`}>
                     <TableCell>
                       <Text size={200}>{name}</Text>

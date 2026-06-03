@@ -16,11 +16,14 @@ import {
   TableHeaderCell,
   TableBody,
   TableCell,
+  Tooltip,
+  Switch,
 } from "@fluentui/react-components";
-import { CursorClick20Regular } from "@fluentui/react-icons";
+import { CursorClick20Regular, Info16Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { EvalConfig } from "../services/excelService";
 import { evaluateCase, readSelectedRangeWithValues } from "../services/excelService";
+import { randomInputWithinBounds } from "../services/sampling";
 import { ObjectiveType } from "../types/gmoo";
 import type { InputVariable } from "../types/workbookState";
 
@@ -83,6 +86,20 @@ function cellToString(raw: unknown): string {
   return String(raw);
 }
 
+/** A small info "i" with a hover/focus tooltip, used to annotate fields inline. */
+const InfoHint: React.FC<{ content: string; label?: string }> = ({ content, label }) => (
+  <Tooltip content={content} relationship="description" withArrow>
+    <span
+      tabIndex={0}
+      role="img"
+      aria-label={label ?? "More information"}
+      style={{ display: "inline-flex", alignItems: "center", cursor: "help", color: tokens.colorNeutralForeground3, marginLeft: "4px", verticalAlign: "middle" }}
+    >
+      <Info16Regular />
+    </span>
+  </Tooltip>
+);
+
 export interface ObjectiveRowData {
   type: ObjectiveType;
   target: string;
@@ -137,6 +154,7 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
     initialObjectives ?? exampleObjectives ?? makeBlankRows(outcomeNames)
   );
   const [initialCaseIndex, setInitialCaseIndex] = useState(0);
+  const [randomizeStart, setRandomizeStart] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -228,16 +246,19 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
     setError(null);
 
     try {
-      // Prefer a real training case. Fall back to per-variable midpoints when
-      // Resume-from-Trial gave us no inputCases (project DTO omits them) so
-      // the user isn't stuck — the value only seeds the first inverse
-      // iteration; the optimizer takes over from there.
-      const initialInput =
-        inputCases[initialCaseIndex] ??
-        inputCases[0] ??
-        (variables.length > 0
-          ? variables.map((v) => (v.min + v.max) / 2)
-          : null);
+      // Choose the starting point that seeds the first inverse iteration:
+      //   • Randomize → a fresh random draw within the variable bounds.
+      //   • Otherwise → the chosen training case, falling back to the first
+      //     case, then per-variable midpoints when Resume-from-Trial gave us no
+      //     inputCases (project DTO omits them) so the user isn't stuck.
+      // Either way the optimizer takes over from this seed.
+      const initialInput = randomizeStart
+        ? (variables.length > 0 ? randomInputWithinBounds(variables) : null)
+        : (inputCases[initialCaseIndex] ??
+           inputCases[0] ??
+           (variables.length > 0
+             ? variables.map((v) => (v.min + v.max) / 2)
+             : null));
       if (!initialInput) {
         setError(
           "No initial input could be derived. Go back and re-define the model's variables."
@@ -302,10 +323,28 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
         <TableHeader>
           <TableRow>
             <TableHeaderCell>Outcome</TableHeaderCell>
-            <TableHeaderCell>Type</TableHeaderCell>
+            <TableHeaderCell>
+              Type
+              <InfoHint
+                label="Objective type help"
+                content="Type controls how the target is interpreted. 'Percent' treats the Min/Max bounds as a percentage tolerance band around the target; 'Value' uses absolute units. Minimize/Maximize ignore the target."
+              />
+            </TableHeaderCell>
             <TableHeaderCell>Target</TableHeaderCell>
-            <TableHeaderCell>Min Bound</TableHeaderCell>
-            <TableHeaderCell>Max Bound</TableHeaderCell>
+            <TableHeaderCell>
+              Min Bound
+              <InfoHint
+                label="Bounds units help"
+                content="For Percent objectives the Min/Max bounds are a tolerance in percent, where 1 = 1% and 0.01 = 0.01%. Note: Excel's convention (1% = 0.01) does NOT apply here — enter 5 for ±5%, not 0.05."
+              />
+            </TableHeaderCell>
+            <TableHeaderCell>
+              Max Bound
+              <InfoHint
+                label="Bounds units help"
+                content="For Percent objectives the Min/Max bounds are a tolerance in percent, where 1 = 1% and 0.01 = 0.01%. Note: Excel's convention (1% = 0.01) does NOT apply here — enter 5 for ±5%, not 0.05."
+              />
+            </TableHeaderCell>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -367,16 +406,54 @@ export const ObjectiveSetup: React.FC<ObjectiveSetupProps> = ({
         </TableBody>
       </Table>
 
-      <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-        <Text size={200}>Initial case index:</Text>
-        <Input
-          size="small"
-          type="number"
-          value={String(initialCaseIndex)}
-          onChange={(_, data) => setInitialCaseIndex(parseInt(data.value) || 0)}
-          style={{ width: "80px" }}
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+        <Switch
+          checked={randomizeStart}
+          onChange={(_, data) => setRandomizeStart(data.checked)}
+          label={
+            <span>
+              Randomize starting point
+              <InfoHint
+                label="Randomize starting point help"
+                content="Seed the optimizer from a random point drawn within each variable's min/max bounds, instead of a fixed training case. Useful for exploring whether the solver converges to the same solution from different starts. Each submit draws a fresh point."
+              />
+            </span>
+          }
         />
-        <Text size={100}>(0-based, default first case)</Text>
+        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+          <Text size={200} style={randomizeStart ? { color: tokens.colorNeutralForegroundDisabled } : undefined}>
+            Starting case (index)
+            <InfoHint
+              label="Starting case help"
+              content="GMOO seeds the inverse optimizer from one of the input cases the model was trained on. This 0-based index picks which training case to start from; the optimizer then explores outward from there. The default (0 = the first case) is fine for most runs — change it only to start the search from a different region of the input space."
+            />
+            :
+          </Text>
+          <Input
+            size="small"
+            type="number"
+            min={0}
+            max={Math.max(0, inputCases.length - 1)}
+            value={String(initialCaseIndex)}
+            disabled={randomizeStart}
+            onChange={(_, data) => {
+              // Clamp to a valid 0-based index. When no cases are loaded
+              // (Resume-from-Trial), keep it at 0 — submit falls back to midpoints.
+              const parsed = parseInt(data.value, 10);
+              const n = isNaN(parsed) ? 0 : parsed;
+              const maxIdx = Math.max(0, inputCases.length - 1);
+              setInitialCaseIndex(Math.max(0, Math.min(maxIdx, n)));
+            }}
+            style={{ width: "80px" }}
+          />
+          <Text size={100}>
+            {randomizeStart
+              ? "(random within variable bounds)"
+              : inputCases.length > 0
+              ? `(0–${inputCases.length - 1}, default first case)`
+              : "(0-based, default first case)"}
+          </Text>
+        </div>
       </div>
 
       {error && (

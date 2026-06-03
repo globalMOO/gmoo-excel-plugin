@@ -29,7 +29,7 @@ function stopReasonFor(inv: Inverse): string | null {
   if (!shouldStop(inv)) return null;
   const r = getStopReason(inv);
   return r === 1 ? "Objective satisfied"
-    : r === 2 ? "Stopped (duplicate inputs)"
+    : r === 2 ? "Converged (optimizer reached the best achievable solution)"
     : r === 3 ? "Exhausted" : "Unknown";
 }
 

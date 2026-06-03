@@ -6,7 +6,6 @@ module.exports = {
   moduleNameMapper: {
     "^@/(.*)$": "<rootDir>/src/$1",
   },
-  setupFilesAfterSetup: [],
   globals: {
     // Mock Office.js globals
     Office: {},

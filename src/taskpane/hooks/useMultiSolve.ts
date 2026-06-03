@@ -10,10 +10,11 @@ import type { Inverse, Result } from "../types/gmoo";
 import {
   getStopReason,
   shouldStop,
-  StopReason,
+  isSolvedStop,
 } from "../types/gmoo";
 import type { EvalConfig } from "../services/excelService";
 import { evaluateCase, writeMultiSolveRun } from "../services/excelService";
+import { randomInputWithinBounds } from "../services/sampling";
 import type { InputVariable } from "../types/workbookState";
 
 export interface MultiSolveSolution {
@@ -69,22 +70,6 @@ function euclidean(a: number[], b: number[]): number {
     s += d * d;
   }
   return Math.sqrt(s);
-}
-
-function randomInput(inputVars: InputVariable[]): number[] {
-  return inputVars.map((v) => {
-    if (v.type === "boolean") return Math.random() < 0.5 ? 0 : 1;
-    if (v.type === "integer" || v.type === "category") {
-      // Uniform integer in [floor(min), floor(max)] inclusive. Category inputs
-      // are represented by their index (categories: string[]) and share the
-      // same integer-in-bounds semantics.
-      const lo = Math.floor(v.min);
-      const hi = Math.floor(v.max);
-      if (hi <= lo) return lo;
-      return lo + Math.floor(Math.random() * (hi - lo + 1));
-    }
-    return v.min + Math.random() * (v.max - v.min);
-  });
 }
 
 export function useMultiSolve(
@@ -200,7 +185,7 @@ export function useMultiSolve(
           }));
 
           // 1. Random initial input within bounds
-          const initialInput = randomInput(inputVariables);
+          const initialInput = randomInputWithinBounds(inputVariables);
 
           // 2. Evaluate initial input through Excel
           let initialOutput: number[];
@@ -331,8 +316,7 @@ export function useMultiSolve(
           }
 
           const satisfied =
-            lastInverse !== null &&
-            getStopReason(lastInverse) === StopReason.Satisfied;
+            lastInverse !== null && isSolvedStop(getStopReason(lastInverse));
 
           const newSolution: MultiSolveSolution = {
             runIndex: run,
