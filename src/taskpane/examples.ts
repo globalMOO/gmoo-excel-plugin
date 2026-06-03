@@ -82,11 +82,13 @@ export const EXAMPLES: Example[] = [
     ],
     outcomeNames: ["W", "X", "Y", "Z"],
     setup: {
+      // Formulas reference the template's Current Value cells (column D). With the
+      // column-wise layout, the 3 inputs A/B/C land at D5/D6/D7 respectively.
       formulas: {
-        W: "=B7^2+2*C7-D7",
-        X: "=B7*C7+D7^2",
-        Y: "=SIN(B7)+C7*D7",
-        Z: "=B7+C7^2-3*D7",
+        W: "=D5^2+2*D6-D7",
+        X: "=D5*D6+D7^2",
+        Y: "=SIN(D5)+D6*D7",
+        Z: "=D5+D6^2-3*D7",
       },
     },
     // Truth case: A=12, B=34, C=-5.6

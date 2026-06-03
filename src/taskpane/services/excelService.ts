@@ -16,15 +16,95 @@ export interface TemplateConfig {
 export interface EvalConfig {
   variableCount: number;
   outcomeCount: number;
-  // Contiguous mode (template sheet) — all cells on one sheet in a grid
+  // Contiguous mode (legacy template sheet) — all cells on one sheet in a grid.
+  // Retained for backward compatibility; the current template builder populates
+  // inputCells/outputCells instead and routes through the non-contiguous path.
   sheetName?: string;
   inputStartRow?: number;
   inputStartCol?: number;
   outputStartRow?: number;
   outputStartCol?: number;
-  // Non-contiguous mode (existing sheet) — each variable mapped to a specific cell
-  inputCells?: string[];  // full addresses like "Sheet1!B7", one per input variable
-  outputCells?: string[]; // full addresses like "Sheet1!B11", one per outcome
+  // Non-contiguous mode — each variable/outcome mapped to a specific cell.
+  inputCells?: string[];  // full addresses like "Sheet1!D5", one per input variable
+  outputCells?: string[]; // full addresses like "Sheet1!B10", one per outcome
+}
+
+/**
+ * Geometry of the generated template sheet. Computed as a pure function so the
+ * addresses can be unit-tested without an Excel context. The layout is
+ * column-wise — each input variable is a row (Name | Min | Max | Current Value),
+ * matching the Define Model table and the _GMOO_State sheet. The add-in writes
+ * input values *down* the Current Value column (D); outcome formulas live in
+ * column B with a live FORMULATEXT mirror in column C.
+ *
+ * Input data rows start at row 5 so a 3-input model lands its Current Value
+ * cells at D5/D6/D7 — the simple-template examples' formulas depend on this.
+ */
+export interface TemplateLayout {
+  titleRow: number;
+  instructionRow: number;
+  inputLabelRow: number;
+  inputHeaderRow: number;
+  inputDataStartRow: number;
+  inputValueCol: string; // "D"
+  outcomeLabelRow: number;
+  outcomeHeaderRow: number;
+  outcomeDataStartRow: number;
+  outcomeFormulaCol: string; // "B"
+  outcomeRefCol: string; // "C"
+  inputCells: string[];
+  outputCells: string[];
+}
+
+/** Wrap a sheet name in single quotes when it contains characters that require
+ *  it in an A1 reference (spaces, etc). parseAddress() tolerates both forms. */
+export function sheetRef(sheetName: string): string {
+  return /^[A-Za-z0-9_]+$/.test(sheetName) ? sheetName : `'${sheetName.replace(/'/g, "''")}'`;
+}
+
+export function buildTemplateLayout(
+  variableCount: number,
+  outcomeCount: number,
+  sheetName: string
+): TemplateLayout {
+  const titleRow = 1;
+  const instructionRow = 2;
+  const inputLabelRow = 3;
+  const inputHeaderRow = 4;
+  const inputDataStartRow = 5; // D5/D6/D7… — example formulas depend on this
+  const inputValueCol = "D";
+
+  const outcomeLabelRow = inputDataStartRow + variableCount + 1;
+  const outcomeHeaderRow = outcomeLabelRow + 1;
+  const outcomeDataStartRow = outcomeHeaderRow + 1;
+  const outcomeFormulaCol = "B";
+  const outcomeRefCol = "C";
+
+  const ref = sheetRef(sheetName);
+  const inputCells: string[] = [];
+  for (let i = 0; i < variableCount; i++) {
+    inputCells.push(`${ref}!${inputValueCol}${inputDataStartRow + i}`);
+  }
+  const outputCells: string[] = [];
+  for (let i = 0; i < outcomeCount; i++) {
+    outputCells.push(`${ref}!${outcomeFormulaCol}${outcomeDataStartRow + i}`);
+  }
+
+  return {
+    titleRow,
+    instructionRow,
+    inputLabelRow,
+    inputHeaderRow,
+    inputDataStartRow,
+    inputValueCol,
+    outcomeLabelRow,
+    outcomeHeaderRow,
+    outcomeDataStartRow,
+    outcomeFormulaCol,
+    outcomeRefCol,
+    inputCells,
+    outputCells,
+  };
 }
 
 const EXCEL_ERROR_VALUES = ["#VALUE!", "#REF!", "#NAME?", "#DIV/0!", "#NULL!", "#N/A", "#GETTING_DATA", "#NUM!"];
@@ -36,71 +116,135 @@ function isExcelError(value: unknown): boolean {
   return false;
 }
 
+/** Apply a thin continuous box (outer edges + inner gridlines) to a range. */
+function applyTableBorders(range: Excel.Range): void {
+  const edges = [
+    "EdgeTop",
+    "EdgeBottom",
+    "EdgeLeft",
+    "EdgeRight",
+    "InsideHorizontal",
+    "InsideVertical",
+  ] as const;
+  for (const edge of edges) {
+    const border = range.format.borders.getItem(edge as Excel.BorderIndex);
+    border.style = Excel.BorderLineStyle.continuous;
+    border.color = "#BFBFBF";
+    border.weight = Excel.BorderWeight.thin;
+  }
+}
+
+const INPUT_FILL = "#D9E1F2"; // light blue — cells the add-in writes
+const OUTPUT_FILL = "#E2EFDA"; // light green — cells the user fills with formulas
+const HEADER_FILL = "#4472C4"; // brand blue — table header rows
+const HEADER_FONT = "#FFFFFF";
+
 export async function createTemplateSheet(config: TemplateConfig): Promise<EvalConfig> {
+  const layout = buildTemplateLayout(
+    config.variables.length,
+    config.outcomeNames.length,
+    config.sheetName
+  );
+
   return Excel.run(async (context) => {
     const sheets = context.workbook.worksheets;
     const sheet = sheets.add(config.sheetName);
+    const L = layout;
 
-    // Row 1: Model name header
-    const headerRange = sheet.getRange("A1:D1");
-    headerRange.merge();
-    headerRange.values = [[`GMOO Model: ${config.modelName}`, "", "", ""]];
-    headerRange.format.font.bold = true;
-    headerRange.format.font.size = 14;
+    // --- Title (row 1) ---
+    const titleRange = sheet.getRange(`A${L.titleRow}:D${L.titleRow}`);
+    titleRange.merge();
+    titleRange.values = [[`GMOO Model: ${config.modelName}`, "", "", ""]];
+    titleRange.format.font.bold = true;
+    titleRange.format.font.size = 14;
+    titleRange.format.font.color = "#1F3864";
 
-    // Row 3: Input Variables header
-    sheet.getRange("A3").values = [["Input Variables"]];
-    sheet.getRange("A3").format.font.bold = true;
+    // --- Instructions (row 2) ---
+    const instr = sheet.getRange(`A${L.instructionRow}:D${L.instructionRow}`);
+    instr.merge();
+    instr.values = [[
+      "Enter each outcome's formula in the Formula column, referencing the Current Value cells (blue). The add-in fills Current Value automatically during evaluation.",
+      "", "", "",
+    ]];
+    instr.format.font.size = 9;
+    instr.format.font.italic = true;
+    instr.format.font.color = "#605E5C";
 
-    // Row 4: Variable names across columns B+
-    // Row 5: Min values
-    // Row 6: Max values
-    // Row 7: Current Value cells (add-in writes here during evaluation)
-    sheet.getRange("A4").values = [["Name"]];
-    sheet.getRange("A5").values = [["Min"]];
-    sheet.getRange("A6").values = [["Max"]];
-    sheet.getRange("A7").values = [["Current Value"]];
+    // --- Input Variables section ---
+    sheet.getRange(`A${L.inputLabelRow}`).values = [["Input Variables"]];
+    sheet.getRange(`A${L.inputLabelRow}`).format.font.bold = true;
+    sheet.getRange(`A${L.inputLabelRow}`).format.font.color = "#1F3864";
+
+    const inHeader = sheet.getRange(`A${L.inputHeaderRow}:D${L.inputHeaderRow}`);
+    inHeader.values = [["Name", "Min", "Max", "Current Value"]];
+    inHeader.format.font.bold = true;
+    inHeader.format.font.color = HEADER_FONT;
+    inHeader.format.fill.color = HEADER_FILL;
 
     for (let i = 0; i < config.variables.length; i++) {
-      const col = String.fromCharCode(66 + i); // B, C, D, ...
-      sheet.getRange(`${col}4`).values = [[config.variables[i].name]];
-      sheet.getRange(`${col}5`).values = [[config.variables[i].min]];
-      sheet.getRange(`${col}6`).values = [[config.variables[i].max]];
-      sheet.getRange(`${col}7`).values = [[0]]; // placeholder
-      sheet.getRange(`${col}7`).format.fill.color = "#D9E1F2";
+      const row = L.inputDataStartRow + i;
+      const v = config.variables[i];
+      sheet.getRange(`A${row}`).values = [[v.name]];
+      sheet.getRange(`B${row}`).values = [[v.min]];
+      sheet.getRange(`C${row}`).values = [[v.max]];
+      const cur = sheet.getRange(`${L.inputValueCol}${row}`);
+      cur.values = [[0]]; // placeholder — add-in overwrites during evaluation
+      cur.format.fill.color = INPUT_FILL;
     }
+    applyTableBorders(
+      sheet.getRange(
+        `A${L.inputHeaderRow}:D${L.inputDataStartRow + config.variables.length - 1}`
+      )
+    );
 
-    // Row 9: Outcomes header
-    sheet.getRange("A9").values = [["Outcomes"]];
-    sheet.getRange("A9").format.font.bold = true;
-    sheet.getRange("A10").values = [["Name"]];
-    sheet.getRange("B10").values = [["Formula"]];
+    // --- Outcomes section ---
+    sheet.getRange(`A${L.outcomeLabelRow}`).values = [["Outcomes"]];
+    sheet.getRange(`A${L.outcomeLabelRow}`).format.font.bold = true;
+    sheet.getRange(`A${L.outcomeLabelRow}`).format.font.color = "#1F3864";
 
-    // Row 11+: Outcome names in col A, formula cells in col B
+    const outHeader = sheet.getRange(`A${L.outcomeHeaderRow}:C${L.outcomeHeaderRow}`);
+    outHeader.values = [["Name", "Formula", "Reference (formula text)"]];
+    outHeader.format.font.bold = true;
+    outHeader.format.font.color = HEADER_FONT;
+    outHeader.format.fill.color = HEADER_FILL;
+
     for (let i = 0; i < config.outcomeNames.length; i++) {
-      const row = 11 + i;
+      const row = L.outcomeDataStartRow + i;
       sheet.getRange(`A${row}`).values = [[config.outcomeNames[i]]];
-      sheet.getRange(`B${row}`).format.fill.color = "#E2EFDA";
+      const fcell = sheet.getRange(`${L.outcomeFormulaCol}${row}`);
+      fcell.format.fill.color = OUTPUT_FILL;
       const formula = config.formulas?.[config.outcomeNames[i]];
       if (formula) {
-        sheet.getRange(`B${row}`).formulas = [[formula]];
+        fcell.formulas = [[formula]];
       }
+      // Live mirror of the formula text so the user can visually verify the
+      // "path" each outcome is wired to (#N/A until a formula is entered).
+      const refCell = sheet.getRange(`${L.outcomeRefCol}${row}`);
+      refCell.formulas = [[`=FORMULATEXT(${L.outcomeFormulaCol}${row})`]];
+      refCell.format.font.color = "#808080";
+      refCell.format.font.italic = true;
     }
+    applyTableBorders(
+      sheet.getRange(
+        `A${L.outcomeHeaderRow}:C${L.outcomeDataStartRow + config.outcomeNames.length - 1}`
+      )
+    );
 
-    // Auto-fit columns
-    sheet.getUsedRange().format.autofitColumns();
+    // --- Column widths & finish ---
+    sheet.getRange("A:A").format.columnWidth = 150;
+    sheet.getRange("B:B").format.columnWidth = 110;
+    sheet.getRange("C:C").format.columnWidth = 160;
+    sheet.getRange("D:D").format.columnWidth = 110;
 
     sheet.activate();
     await context.sync();
 
     return {
       sheetName: config.sheetName,
-      inputStartRow: 7,
-      inputStartCol: 2, // column B = 2 (1-indexed)
-      outputStartRow: 11,
-      outputStartCol: 2, // column B
       variableCount: config.variables.length,
       outcomeCount: config.outcomeNames.length,
+      inputCells: layout.inputCells,
+      outputCells: layout.outputCells,
     };
   });
 }
@@ -251,6 +395,52 @@ export async function readSelectedRange(): Promise<string> {
   });
 }
 
+/**
+ * Enumerate the individual cell addresses of a rectangular range, row-major
+ * (top→bottom, then left→right within each row). Pure so it can be unit-tested.
+ * A single column reads top-to-bottom; a single row reads left-to-right.
+ */
+export function enumerateRangeAddresses(
+  sheetName: string,
+  startRowIndex: number, // 0-based
+  startColIndex: number, // 0-based
+  rowCount: number,
+  columnCount: number
+): string[] {
+  const ref = sheetRef(sheetName);
+  const addresses: string[] = [];
+  for (let r = 0; r < rowCount; r++) {
+    for (let c = 0; c < columnCount; c++) {
+      const col = columnLetter(startColIndex + c);
+      const row = startRowIndex + r + 1; // A1 rows are 1-based
+      addresses.push(`${ref}!${col}${row}`);
+    }
+  }
+  return addresses;
+}
+
+/**
+ * Read the currently-selected range and return the flattened, row-major list of
+ * its individual cell addresses (sheet-qualified). Used to bulk-map inputs or
+ * outputs in one gesture rather than picking each cell individually.
+ */
+export async function readSelectedCellAddresses(): Promise<string[]> {
+  return Excel.run(async (context) => {
+    const range = context.workbook.getSelectedRange();
+    const ws = range.worksheet;
+    range.load(["rowIndex", "columnIndex", "rowCount", "columnCount"]);
+    ws.load("name");
+    await context.sync();
+    return enumerateRangeAddresses(
+      ws.name,
+      range.rowIndex,
+      range.columnIndex,
+      range.rowCount,
+      range.columnCount
+    );
+  });
+}
+
 export async function readRangeValues(address: string): Promise<unknown[][]> {
   return Excel.run(async (context) => {
     const range = context.workbook.worksheets.getActiveWorksheet().getRange(address);
@@ -280,7 +470,7 @@ export async function readSelectedRangeWithValues(): Promise<{
 
 // --- Non-contiguous cell operations ---
 
-function parseAddress(fullAddress: string): { sheet: string; cell: string } {
+export function parseAddress(fullAddress: string): { sheet: string; cell: string } {
   const idx = fullAddress.lastIndexOf("!");
   if (idx === -1) return { sheet: "", cell: fullAddress };
   return { sheet: fullAddress.slice(0, idx).replace(/'/g, ""), cell: fullAddress.slice(idx + 1) };
