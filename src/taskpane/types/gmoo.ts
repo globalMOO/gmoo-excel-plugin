@@ -138,12 +138,24 @@ export function getStopReasonLabel(reason: StopReason): string {
     case StopReason.Satisfied:
       return "Objective satisfied";
     case StopReason.Stopped:
-      return "Stopped (duplicate inputs suggested)";
+      // The API reports "Stopped" when it can only re-suggest inputs it has
+      // already tried — i.e. the optimizer has converged and can't improve
+      // further. That's a solved state, not a failure.
+      return "Converged (optimizer reached the best achievable solution)";
     case StopReason.Exhausted:
       return "Exhausted all attempts";
     case StopReason.Running:
       return "Running";
   }
+}
+
+/**
+ * Whether a stop reason represents a successful outcome. Both an explicitly
+ * Satisfied objective and a "Stopped" (converged — no further improvement
+ * possible) run count as solved; only Exhausted/Running do not.
+ */
+export function isSolvedStop(reason: StopReason): boolean {
+  return reason === StopReason.Satisfied || reason === StopReason.Stopped;
 }
 
 // --- L1 error helpers ---

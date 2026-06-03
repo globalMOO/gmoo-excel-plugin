@@ -22,8 +22,12 @@ import {
   Flash20Regular,
 } from "@fluentui/react-icons";
 import type { Inverse } from "../types/gmoo";
-import { getStopReason, getStopReasonLabel, StopReason, filteredL1Norm, isTargetBasedType } from "../types/gmoo";
+import { getStopReason, getStopReasonLabel, StopReason, ObjectiveType, filteredL1Norm, isTargetBasedType, isSolvedStop } from "../types/gmoo";
 import { createResultsCharts } from "../services/excelChartService";
+import { SingleResultRadar } from "./charts/SingleResultRadar";
+
+// Minimize/Maximize have no meaningful target to display (mirrors MultiSolvePanel).
+const NO_TARGET_TYPES = new Set<string>([ObjectiveType.Minimize, ObjectiveType.Maximize]);
 
 const useStyles = makeStyles({
   container: {
@@ -118,13 +122,15 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
         Optimization Results
       </Text>
 
-      {/* Stop Reason */}
-      <MessageBar
-        intent={stopReason === StopReason.Satisfied ? "success" : "warning"}
-      >
+      {/* Stop Reason — both Satisfied and Converged ("Stopped") are successes. */}
+      <MessageBar intent={isSolvedStop(stopReason) ? "success" : "warning"}>
         <MessageBarBody>
           <MessageBarTitle>
-            {stopReason === StopReason.Satisfied ? "Objective Satisfied" : "Optimization Complete"}
+            {stopReason === StopReason.Satisfied
+              ? "Objective Satisfied"
+              : stopReason === StopReason.Stopped
+              ? "Optimizer Converged"
+              : "Optimization Complete"}
           </MessageBarTitle>
           {getStopReasonLabel(stopReason)} after {iterations.length} iterations.
         </MessageBarBody>
@@ -193,7 +199,11 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
                     <Text size={200}>{outcomeNames[i] ?? `Outcome ${i + 1}`}</Text>
                   </TableCell>
                   <TableCell>
-                    <Text size={200}>{result.objective.toPrecision(4)}</Text>
+                    <Text size={200}>
+                      {NO_TARGET_TYPES.has(result.objectiveType)
+                        ? "—"
+                        : result.objective.toPrecision(4)}
+                    </Text>
                   </TableCell>
                   <TableCell>
                     <Text size={200}>{result.output.toPrecision(4)}</Text>
@@ -218,6 +228,14 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
         </>
       )}
 
+      {/* Radar view of the optimal solution (raw values). Inputs as one polygon;
+          outcomes overlay Achieved vs Target. Only meaningful with ≥3 axes. */}
+      <SingleResultRadar
+        inverse={bestInverse}
+        inputVariableNames={inputVariableNames}
+        outcomeNames={outcomeNames}
+      />
+
       {/* Actions */}
       <div className={styles.buttonRow}>
         <Button
@@ -225,12 +243,12 @@ export const ResultsSummary: React.FC<ResultsSummaryProps> = ({
           icon={<ChartMultiple20Regular />}
           appearance="primary"
           onClick={handleCreateCharts}
-          disabled={isCreatingCharts || chartsCreated}
+          disabled={isCreatingCharts}
         >
           {isCreatingCharts ? (
             <Spinner size="tiny" />
           ) : chartsCreated ? (
-            "Charts Created"
+            "Regenerate Excel Charts"
           ) : (
             "Generate Excel Charts"
           )}
