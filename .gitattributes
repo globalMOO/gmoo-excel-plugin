@@ -1,0 +1,18 @@
+# Normalize all text files to LF in the repository and on checkout.
+# Prevents CRLF/LF churn on WSL/Windows working trees.
+* text=auto eol=lf
+
+# Binary assets — never normalize or diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.xlsx binary
+*.xls binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.pdf binary
