@@ -24,7 +24,7 @@ import {
 import { CursorClick20Regular, Add20Regular, Delete20Regular } from "@fluentui/react-icons";
 import type { GmooClient } from "../services/gmooApi";
 import type { InputVariable } from "../types/workbookState";
-import type { EvalConfig } from "../services/excelService";
+import type { CalcMode, EvalConfig } from "../services/excelService";
 import { createTemplateSheet, evaluateAllCases, readSelectedRange, readSelectedRangeWithValues, readSelectedCellAddresses, loadStateSheet, saveStateSheet, type GmooStateData } from "../services/excelService";
 
 /** Parse a 2-D values array into outcome names (first column, blank rows skipped). */
@@ -122,6 +122,12 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     initialEvalConfig?.inputCells ? "existing" : "template"
   );
   const [evalConfig, setEvalConfig] = useState<EvalConfig | null>(initialEvalConfig ?? null);
+  // Recalculation mode for evaluations. "recalculate" (changed-only) is
+  // correct for virtually all workbooks and far faster on large models;
+  // "full" recomputes every formula each case (pre-option behavior).
+  const [calcMode, setCalcMode] = useState<CalcMode>(
+    initialEvalConfig?.calcMode ?? "recalculate"
+  );
   const [isCreatingSheet, setIsCreatingSheet] = useState(false);
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
@@ -198,6 +204,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
 
       setInputCellMap(newInputMap);
       setOutputCellMap(newOutputMap);
+      if (data.calcMode) setCalcMode(data.calcMode);
       setStateLoaded(true);
       setIsLoadingState(false);
     }).catch(() => {
@@ -262,7 +269,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         sheetName,
         formulas,
       });
-      setEvalConfig(config);
+      setEvalConfig({ ...config, calcMode });
       setSheetCreated(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create template sheet.");
@@ -335,6 +342,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       outcomeCount: filledOutcomeNames.length,
       inputCells: inputCellMap.map((c) => c.trim()),
       outputCells: outputCellMap.map((c) => c.trim()),
+      calcMode,
     };
     setEvalConfig(config);
     setSheetCreated(true);
@@ -347,9 +355,13 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
     setIsEvaluating(true);
     setError(null);
 
+    // Apply the current calc-mode selection even if the mapping was
+    // confirmed before the user toggled the option.
+    const activeConfig: EvalConfig = { ...evalConfig, calcMode };
+
     try {
       const { outputCases, errors } = await evaluateAllCases(
-        evalConfig,
+        activeConfig,
         inputCases,
         (current, total) => setProgress({ current, total })
       );
@@ -378,6 +390,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
       try {
         await saveStateSheet({
           projectId,
+          calcMode,
           variables: variables.map((v, i) => ({
             name: v.name,
             type: v.type,
@@ -395,7 +408,7 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
         console.warn("[GMOO] Failed to save state sheet");
       }
 
-      onComplete(trial.id, evalConfig, filledOutcomeNames);
+      onComplete(trial.id, activeConfig, filledOutcomeNames);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Evaluation failed.");
     } finally {
@@ -730,6 +743,26 @@ export const CaseEvaluation: React.FC<CaseEvaluationProps> = ({
 
       {sheetCreated && (
         <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+            <Text size={200} weight="semibold">
+              Excel calculation per case
+            </Text>
+            <RadioGroup
+              layout="horizontal"
+              value={calcMode}
+              onChange={(_, data) => setCalcMode(data.value as CalcMode)}
+              disabled={isEvaluating}
+            >
+              <Radio value="recalculate" label="Changed-only (fast)" />
+              <Radio value="full" label="Full recalculation" />
+            </RadioGroup>
+            <Text size={200} style={{ color: tokens.colorNeutralForeground3 }}>
+              Changed-only recalculates just the formulas affected by the input
+              cells (like pressing F9) and is recommended. Full recalculates
+              every formula in every open workbook each case — much slower on
+              large models; use it only if outputs seem stale with changed-only.
+            </Text>
+          </div>
           <Button
             appearance="primary"
             onClick={handleEvaluate}

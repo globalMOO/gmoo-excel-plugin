@@ -13,9 +13,21 @@ export interface TemplateConfig {
   formulas?: Record<string, string>;
 }
 
+/** How Excel recalculates between writing inputs and reading outputs.
+ *  - "recalculate": incremental — only dependency chains dirtied by the input
+ *    writes (plus volatile cells) recompute. Correct for virtually all
+ *    workbooks and dramatically faster on large models.
+ *  - "full": every formula in every open workbook recomputes each evaluation.
+ *    Use when dependency tracking can't be trusted (e.g. some UDF/external
+ *    setups). This was the only behavior before the option existed. */
+export type CalcMode = "full" | "recalculate";
+
 export interface EvalConfig {
   variableCount: number;
   outcomeCount: number;
+  /** Recalculation mode for evaluations; defaults to "full" when absent
+   *  (backward compatible with configs saved before this option existed). */
+  calcMode?: CalcMode;
   // Contiguous mode (legacy template sheet) — all cells on one sheet in a grid.
   // Retained for backward compatibility; the current template builder populates
   // inputCells/outputCells instead and routes through the non-contiguous path.
@@ -266,13 +278,31 @@ export async function writeInputValues(
   });
 }
 
-export async function calculateAndWait(): Promise<void> {
+export async function calculateAndWait(mode: CalcMode = "full"): Promise<void> {
   await Excel.run(async (context) => {
-    context.workbook.application.calculate(Excel.CalculationType.full);
+    context.workbook.application.calculate(
+      mode === "recalculate"
+        ? Excel.CalculationType.recalculate
+        : Excel.CalculationType.full
+    );
     await context.sync();
   });
 
-  // Poll calculationState until done
+  // Wait only while Excel is ACTIVELY calculating; proceed once it is not.
+  //
+  // We must NOT wait for state === "done": workbooks containing volatile
+  // functions (INDIRECT/OFFSET/CELL/NOW/TODAY) or iterative circular
+  // references remain permanently "pending" after every recalc, because
+  // volatiles are always considered dirty. Waiting for "done" therefore
+  // stalls the entire RECALC_TIMEOUT (e.g. 30s) on EVERY case for such
+  // workbooks, even though the calculate+context.sync above already produced
+  // correct, current values (verified: a model that recalcs in ~5s reports
+  // "pending" indefinitely).
+  //
+  // "pending" = "volatiles would recompute if triggered", not "this recalc is
+  // unfinished". Only "calculating" means work is genuinely in progress, so we
+  // block on that alone. Host commands are serialized, so the subsequent
+  // output read cannot execute before this recalc completes regardless.
   const start = Date.now();
   while (Date.now() - start < RECALC_TIMEOUT) {
     const state = await Excel.run(async (context) => {
@@ -282,10 +312,13 @@ export async function calculateAndWait(): Promise<void> {
       return app.calculationState;
     });
 
-    if (state === Excel.CalculationState.done) return;
+    // Done or Pending -> values are current; only keep waiting while Calculating.
+    if (state !== Excel.CalculationState.calculating) return;
     await delay(RECALC_POLL_INTERVAL);
   }
-  throw new Error("Calculation timed out after 30 seconds.");
+  console.warn(
+    "Excel still reports 'calculating' after timeout; proceeding with read."
+  );
 }
 
 export async function readOutputValues(
@@ -341,7 +374,7 @@ export async function evaluateCase(
   if (config.inputCells && config.outputCells) {
     // Non-contiguous mode: write to individual cells, read from individual cells
     await writeCellValues(config.inputCells, inputValues);
-    await calculateAndWait();
+    await calculateAndWait(config.calcMode ?? "full");
     return readCellValues(config.outputCells);
   }
 
@@ -638,6 +671,8 @@ export interface GmooStateData {
   /** Project the cell mappings belong to. Optional for backward compat with
    *  pre-tagging sheets — when absent, callers may load tentatively. */
   projectId?: number;
+  /** Persisted recalculation mode; absent on sheets saved before the option. */
+  calcMode?: CalcMode;
   variables: { name: string; type: string; min: number; max: number; inputCell: string }[];
   outcomes: { name: string; outputCell: string }[];
 }
@@ -677,6 +712,7 @@ export async function loadStateSheet(): Promise<GmooStateData | null> {
     let varHeaderRow = -1;
     let outHeaderRow = -1;
     let projectId: number | undefined;
+    let calcMode: CalcMode | undefined;
     for (let r = 0; r < rows.length; r++) {
       const label = String(rows[r][0]).trim();
       if (label === "Variables") varHeaderRow = r;
@@ -685,6 +721,13 @@ export async function loadStateSheet(): Promise<GmooStateData | null> {
         const raw = rows[r][1];
         const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
         if (!isNaN(n) && n > 0) projectId = n;
+      }
+      // Calc Mode tag lives in columns D/E of the Project ID row so the fixed
+      // row layout (Variables at row 3) is unchanged for older readers.
+      const tag = String(rows[r][3] ?? "").trim();
+      if (tag === "Calc Mode") {
+        const raw = String(rows[r][4] ?? "").trim();
+        if (raw === "full" || raw === "recalculate") calcMode = raw;
       }
     }
 
@@ -716,7 +759,7 @@ export async function loadStateSheet(): Promise<GmooStateData | null> {
     }
 
     if (variables.length === 0 || outcomes.length === 0) return null;
-    return { projectId, variables, outcomes };
+    return { projectId, calcMode, variables, outcomes };
   });
 }
 
@@ -750,6 +793,13 @@ export async function saveStateSheet(data: GmooStateData): Promise<void> {
       sheet.getRange("A2").values = [["Project ID"]];
       sheet.getRange("A2").format.font.color = "#605E5C";
       sheet.getRange("B2").values = [[data.projectId]];
+    }
+
+    // Calc Mode tag (columns D/E of row 2 so row layout below is unchanged)
+    if (data.calcMode) {
+      sheet.getRange("D2").values = [["Calc Mode"]];
+      sheet.getRange("D2").format.font.color = "#605E5C";
+      sheet.getRange("E2").values = [[data.calcMode]];
     }
 
     // Variables section
