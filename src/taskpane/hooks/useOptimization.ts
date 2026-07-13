@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import type { GmooClient } from "../services/gmooApi";
+import { GmooCancelledError } from "../services/gmooApi";
 import type { Inverse } from "../types/gmoo";
 import { shouldStop, getStopReason } from "../types/gmoo";
 import type { EvalConfig } from "../services/excelService";
@@ -41,6 +42,9 @@ export function useOptimization(
   const [state, setState] = useState<OptimizationState>(EMPTY_STATE);
 
   const abortRef = useRef(false);
+  // Aborts in-flight API calls when the user stops a run; the boolean abortRef
+  // alone only halts the loop *between* iterations.
+  const controllerRef = useRef<AbortController | null>(null);
   // Track which objectiveId we've already loaded history for, so a re-render
   // (e.g. evalConfig flipping in) doesn't re-fetch and clobber an in-progress
   // run.
@@ -52,6 +56,7 @@ export function useOptimization(
   // immediately rather than blank.
   useEffect(() => {
     abortRef.current = true; // cancel any running loop tied to the prior id
+    controllerRef.current?.abort();
     setState(EMPTY_STATE);
     if (!client || !objectiveId) {
       loadedHistoryForRef.current = null;
@@ -86,28 +91,29 @@ export function useOptimization(
     };
   }, [client, objectiveId]);
 
-  const runIteration = useCallback(async (): Promise<Inverse | null> => {
+  const runIteration = useCallback(async (signal?: AbortSignal): Promise<Inverse | null> => {
     if (!client || !objectiveId || !evalConfig) return null;
 
-    const inverse = await client.suggestInverse(objectiveId);
+    const inverse = await client.suggestInverse(objectiveId, signal);
 
     const result = await evaluateCase(evalConfig, inverse.input);
     if (result.errors.length > 0) {
       throw new Error(`Formula errors: ${result.errors.join("; ")}`);
     }
 
-    return client.loadInverseOutput(inverse.id, result.outputs);
+    return client.loadInverseOutput(inverse.id, result.outputs, signal);
   }, [client, objectiveId, evalConfig]);
 
   // Fetch iteration 0 from the objective's initial inverse
-  const fetchInitialInverse = useCallback(async (): Promise<Inverse | null> => {
+  const fetchInitialInverse = useCallback(async (signal?: AbortSignal): Promise<Inverse | null> => {
     if (!client || !objectiveId) return null;
     try {
-      const objective = await client.getObjective(objectiveId);
+      const objective = await client.getObjective(objectiveId, signal);
       if (objective.inverses && objective.inverses.length > 0) {
         return objective.inverses[0];
       }
     } catch (err) {
+      if (err instanceof GmooCancelledError) throw err;
       console.warn("[Optimize] Could not fetch initial inverse:", err);
     }
     return null;
@@ -137,6 +143,8 @@ export function useOptimization(
       if (!client || !objectiveId || !evalConfig) return;
 
       abortRef.current = false;
+      const controller = new AbortController();
+      controllerRef.current = controller;
       setState((prev) => ({
         ...prev,
         isRunning: true,
@@ -149,7 +157,7 @@ export function useOptimization(
         let startFrom: number;
         const currentCount = state.iterations.length;
         if (currentCount === 0) {
-          const initial = await fetchInitialInverse();
+          const initial = await fetchInitialInverse(controller.signal);
           if (initial) {
             updateStateWithInverse(initial, 0, true);
           }
@@ -164,7 +172,7 @@ export function useOptimization(
             break;
           }
 
-          const inverse = await runIteration();
+          const inverse = await runIteration(controller.signal);
           if (!inverse) break;
 
           updateStateWithInverse(inverse, startFrom + i + 1);
@@ -172,11 +180,15 @@ export function useOptimization(
           if (shouldStop(inverse)) break;
         }
       } catch (err) {
-        console.error("[Optimize] Error:", err);
-        setState((prev) => ({
-          ...prev,
-          error: err instanceof Error ? err.message : "Unknown error",
-        }));
+        if (err instanceof GmooCancelledError) {
+          setState((prev) => ({ ...prev, stopReason: "Paused by user" }));
+        } else {
+          console.error("[Optimize] Error:", err);
+          setState((prev) => ({
+            ...prev,
+            error: err instanceof Error ? err.message : "Unknown error",
+          }));
+        }
       } finally {
         setState((prev) => ({ ...prev, isRunning: false }));
       }
@@ -187,6 +199,9 @@ export function useOptimization(
   const runSingle = useCallback(async () => {
     if (!client || !objectiveId || !evalConfig) return;
 
+    abortRef.current = false;
+    const controller = new AbortController();
+    controllerRef.current = controller;
     setState((prev) => ({ ...prev, isRunning: true, error: null }));
     try {
       // Track count locally — `state.iterations.length` is captured in this
@@ -195,23 +210,27 @@ export function useOptimization(
       // first manual iteration, mis-labeling the new inverse as iter 0.
       let count = state.iterations.length;
       if (count === 0) {
-        const initial = await fetchInitialInverse();
+        const initial = await fetchInitialInverse(controller.signal);
         if (initial) {
           updateStateWithInverse(initial, 0, true);
           count = 1;
         }
       }
 
-      const inverse = await runIteration();
+      const inverse = await runIteration(controller.signal);
       if (inverse) {
         updateStateWithInverse(inverse, count);
       }
     } catch (err) {
-      console.error("[Optimize] Single error:", err);
-      setState((prev) => ({
-        ...prev,
-        error: err instanceof Error ? err.message : "Unknown error",
-      }));
+      if (err instanceof GmooCancelledError) {
+        setState((prev) => ({ ...prev, stopReason: "Paused by user" }));
+      } else {
+        console.error("[Optimize] Single error:", err);
+        setState((prev) => ({
+          ...prev,
+          error: err instanceof Error ? err.message : "Unknown error",
+        }));
+      }
     } finally {
       setState((prev) => ({ ...prev, isRunning: false }));
     }
@@ -219,10 +238,12 @@ export function useOptimization(
 
   const stop = useCallback(() => {
     abortRef.current = true;
+    controllerRef.current?.abort();
   }, []);
 
   const reset = useCallback(() => {
     abortRef.current = true;
+    controllerRef.current?.abort();
     // Allow the next render to re-load history for the current objective
     // (e.g. user came back to Optimize after editing the objective).
     loadedHistoryForRef.current = null;

@@ -6,6 +6,7 @@
 // diagnostic field to show how clustered the results are.
 import { useCallback, useRef, useState } from "react";
 import type { GmooClient } from "../services/gmooApi";
+import { GmooCancelledError } from "../services/gmooApi";
 import type { Inverse, Result } from "../types/gmoo";
 import {
   getStopReason,
@@ -89,13 +90,18 @@ export function useMultiSolve(
   });
 
   const abortRef = useRef(false);
+  // Aborts in-flight API calls when the user stops a run; the boolean abortRef
+  // alone only halts the loop between steps.
+  const controllerRef = useRef<AbortController | null>(null);
 
   const stop = useCallback(() => {
     abortRef.current = true;
+    controllerRef.current?.abort();
   }, []);
 
   const reset = useCallback(() => {
     abortRef.current = true;
+    controllerRef.current?.abort();
     setState({
       isRunning: false,
       solutions: [],
@@ -120,6 +126,8 @@ export function useMultiSolve(
       const maxIterations = config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
 
       abortRef.current = false;
+      const controller = new AbortController();
+      controllerRef.current = controller;
       setState({
         isRunning: true,
         solutions: [],
@@ -220,9 +228,12 @@ export function useMultiSolve(
               initialOutput,
               0,
               config.minBounds,
-              config.maxBounds
+              config.maxBounds,
+              controller.signal
             );
           } catch (err) {
+            // User pressed Stop — not a failed run
+            if (err instanceof GmooCancelledError) break;
             console.warn(`[MultiSolve] Run ${run + 1}: loadObjectives failed`, err);
             runsFailed++;
             await logRun(run, "failed", null, null, false, null, null, initialInput, null, initialOutput, `loadObjectives threw: ${err instanceof Error ? err.message : String(err)}`);
@@ -252,9 +263,11 @@ export function useMultiSolve(
 
             let suggested: Inverse;
             try {
-              suggested = await client.suggestInverse(objective.id);
+              suggested = await client.suggestInverse(objective.id, controller.signal);
             } catch (err) {
-              console.warn(`[MultiSolve] Run ${run + 1} iter ${i + 1}: suggestInverse failed`, err);
+              if (!(err instanceof GmooCancelledError)) {
+                console.warn(`[MultiSolve] Run ${run + 1} iter ${i + 1}: suggestInverse failed`, err);
+              }
               break;
             }
 
@@ -271,9 +284,15 @@ export function useMultiSolve(
             }
 
             try {
-              lastInverse = await client.loadInverseOutput(suggested.id, excelResult.outputs);
+              lastInverse = await client.loadInverseOutput(
+                suggested.id,
+                excelResult.outputs,
+                controller.signal
+              );
             } catch (err) {
-              console.warn(`[MultiSolve] Run ${run + 1} iter ${i + 1}: loadInverseOutput failed`, err);
+              if (!(err instanceof GmooCancelledError)) {
+                console.warn(`[MultiSolve] Run ${run + 1} iter ${i + 1}: loadInverseOutput failed`, err);
+              }
               break;
             }
 

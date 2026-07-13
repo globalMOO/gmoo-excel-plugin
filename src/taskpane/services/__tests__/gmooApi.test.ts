@@ -1,6 +1,10 @@
-import { GmooClient, GmooApiError } from "../gmooApi";
+import { GmooClient, GmooApiError, GmooTimeoutError, GmooCancelledError } from "../gmooApi";
 
 const BASE = "https://api.test.example/api/";
+
+// For tests that spy on setTimeout with an instant-firing implementation, the
+// request timeout must be disabled or it would abort every request immediately.
+const NO_TIMEOUT = { timeoutMs: 0 };
 
 // Build a Response-like object. We avoid `new Response(...)` because the
 // jsdom version pinned by this project doesn't ship the fetch Response
@@ -117,7 +121,7 @@ describe("error mapping", () => {
       async json() { throw new Error("no body"); },
       async text() { throw new Error("stream error"); },
     });
-    const client = new GmooClient("key", BASE);
+    const client = new GmooClient("key", BASE, NO_TIMEOUT);
 
     // 502 is retryable; instant delays keep the test fast
     jest.spyOn(globalThis, "setTimeout").mockImplementation(((cb: () => void) => {
@@ -146,7 +150,7 @@ describe("retry with exponential backoff", () => {
 
   it("retries 500s with 4s/8s/10s-capped backoff, then throws after 4 attempts", async () => {
     mockFetchSequence(makeResponse(500, { message: "boom" }));
-    const client = new GmooClient("key", BASE);
+    const client = new GmooClient("key", BASE, NO_TIMEOUT);
 
     await expect(client.getModels()).rejects.toMatchObject({ status: 500 });
     expect(fetchMock).toHaveBeenCalledTimes(4);
@@ -155,7 +159,7 @@ describe("retry with exponential backoff", () => {
 
   it("retries 429 and returns the result once a retry succeeds", async () => {
     mockFetchSequence(makeResponse(429, { message: "slow down" }), makeResponse(200, [{ id: 1 }]));
-    const client = new GmooClient("key", BASE);
+    const client = new GmooClient("key", BASE, NO_TIMEOUT);
 
     await expect(client.getModels()).resolves.toEqual([{ id: 1 }]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -164,11 +168,65 @@ describe("retry with exponential backoff", () => {
 
   it("does not retry client errors (400)", async () => {
     mockFetchSequence(makeResponse(400, { message: "bad request" }));
-    const client = new GmooClient("key", BASE);
+    const client = new GmooClient("key", BASE, NO_TIMEOUT);
 
     await expect(client.getModels()).rejects.toMatchObject({ status: 400 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(delays).toEqual([]);
+  });
+});
+
+describe("timeout and cancellation", () => {
+  // A fetch that never resolves on its own — it only rejects when the signal
+  // the client passed in aborts, mirroring real fetch semantics.
+  function mockHangingFetch() {
+    fetchMock = jest.fn(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_, reject) => {
+          init.signal.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError"))
+          );
+        })
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+  }
+
+  it("rejects a hung request with GmooTimeoutError after the configured timeout", async () => {
+    mockHangingFetch();
+    const client = new GmooClient("key", BASE, { timeoutMs: 20 });
+
+    const err = await client.getModels().catch((e) => e);
+    expect(err).toBeInstanceOf(GmooTimeoutError);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // timeouts are not retried
+  });
+
+  it("rejects with GmooCancelledError when the caller's signal aborts mid-flight", async () => {
+    mockHangingFetch();
+    const client = new GmooClient("key", BASE);
+    const controller = new AbortController();
+
+    const pending = client.getModels(controller.signal);
+    controller.abort();
+
+    const err = await pending.catch((e) => e);
+    expect(err).toBeInstanceOf(GmooCancelledError);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // cancellations are not retried
+  });
+
+  it("short-circuits without a request when the signal is already aborted", async () => {
+    mockFetchSequence(makeResponse(200, []));
+    const client = new GmooClient("key", BASE);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(client.getModels(controller.signal)).rejects.toBeInstanceOf(GmooCancelledError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("completes normally when the response arrives before the timeout", async () => {
+    mockFetchSequence(makeResponse(200, [{ id: 1 }]));
+    const client = new GmooClient("key", BASE, { timeoutMs: 5000 });
+    await expect(client.getModels()).resolves.toEqual([{ id: 1 }]);
   });
 });
 

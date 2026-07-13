@@ -1,6 +1,7 @@
 import { renderHook, act, waitFor } from "@testing-library/react";
 import { useOptimization } from "../useOptimization";
 import type { GmooClient } from "../../services/gmooApi";
+import { GmooCancelledError } from "../../services/gmooApi";
 import type { EvalConfig } from "../../services/excelService";
 import { evaluateCase } from "../../services/excelService";
 import type { Inverse, Objective } from "../../types/gmoo";
@@ -259,6 +260,33 @@ describe("run()", () => {
     expect(client.suggestInverse).toHaveBeenCalledTimes(1);
     expect(result.current.iterations).toHaveLength(2); // initial + the finished iteration
     expect(result.current.stopReason).toBe("Paused by user");
+    expect(result.current.isRunning).toBe(false);
+  });
+
+  it("stop() aborts an in-flight API call and reports 'Paused by user', not an error", async () => {
+    const client = makeClient();
+    setupFreshRun(client);
+    // Mirrors the real client: the call hangs until the run's signal aborts,
+    // then rejects with GmooCancelledError.
+    client.suggestInverse.mockImplementation(
+      (_id: number, signal?: AbortSignal) =>
+        new Promise((_, reject) =>
+          signal?.addEventListener("abort", () => reject(new GmooCancelledError()))
+        )
+    );
+
+    const { result } = renderHook(() => useOptimization(asClient(client), 7, evalConfig));
+    await act(async () => {});
+
+    await act(async () => {
+      const running = result.current.run(10);
+      await Promise.resolve(); // let the loop reach the hanging suggestInverse
+      result.current.stop();
+      await running;
+    });
+
+    expect(result.current.stopReason).toBe("Paused by user");
+    expect(result.current.error).toBeNull();
     expect(result.current.isRunning).toBe(false);
   });
 
