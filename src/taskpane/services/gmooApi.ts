@@ -31,6 +31,9 @@ import type {
 const VALID_INPUT_TYPES = ["boolean", "category", "float", "integer"];
 const MAX_RETRIES = 3;
 const DEFAULT_BASE_URL = "https://app.globalmoo.com/api/";
+// suggest-inverse runs the optimizer server-side and can legitimately take a
+// while on large models, so the default is generous.
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 export class GmooApiError extends Error {
   constructor(
@@ -43,33 +46,56 @@ export class GmooApiError extends Error {
   }
 }
 
+/** A request exceeded the client's timeout. Not retried. */
+export class GmooTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    this.name = "GmooTimeoutError";
+  }
+}
+
+/** A request was cancelled via the caller's AbortSignal. Not retried. */
+export class GmooCancelledError extends Error {
+  constructor() {
+    super("Request cancelled.");
+    this.name = "GmooCancelledError";
+  }
+}
+
+export interface GmooClientOptions {
+  /** Per-request timeout in milliseconds. 0 disables the timeout. */
+  timeoutMs?: number;
+}
+
 export class GmooClient {
   private apiKey: string;
   private baseUrl: string;
+  private timeoutMs: number;
 
-  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL) {
+  constructor(apiKey: string, baseUrl: string = DEFAULT_BASE_URL, options?: GmooClientOptions) {
     if (!apiKey) {
       throw new Error("API key cannot be empty.");
     }
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.endsWith("/") ? baseUrl : baseUrl + "/";
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   // --- Model Operations ---
 
-  async getModels(): Promise<Model[]> {
-    return this.get<Model[]>("models");
+  async getModels(signal?: AbortSignal): Promise<Model[]> {
+    return this.get<Model[]>("models", signal);
   }
 
-  async getModel(modelId: number): Promise<Model> {
+  async getModel(modelId: number, signal?: AbortSignal): Promise<Model> {
     if (modelId <= 0) throw new Error("Model ID must be greater than zero.");
-    return this.get<Model>(`models/${modelId}`);
+    return this.get<Model>(`models/${modelId}`, signal);
   }
 
-  async createModel(name: string, description?: string): Promise<Model> {
+  async createModel(name: string, description?: string, signal?: AbortSignal): Promise<Model> {
     if (!name || !name.trim()) throw new Error("Model name cannot be empty.");
     const request: CreateModelRequest = { name, description };
-    return this.post<Model>("models", request);
+    return this.post<Model>("models", request, signal);
   }
 
   // --- Project Operations ---
@@ -81,7 +107,8 @@ export class GmooClient {
     minimums: number[],
     maximums: number[],
     inputTypes: string[],
-    categories?: string[]
+    categories?: string[],
+    signal?: AbortSignal
   ): Promise<Project> {
     // Validation matching C# SDK
     if (modelId <= 0) throw new Error("Model ID must be greater than zero.");
@@ -118,7 +145,7 @@ export class GmooClient {
       inputTypes,
       categories: categories ?? [],
     };
-    return this.post<Project>(`models/${modelId}/projects`, request);
+    return this.post<Project>(`models/${modelId}/projects`, request, signal);
   }
 
   // --- Output Cases ---
@@ -126,7 +153,8 @@ export class GmooClient {
   async loadOutputCases(
     projectId: number,
     outputCount: number,
-    outputCases: number[][]
+    outputCases: number[][],
+    signal?: AbortSignal
   ): Promise<Trial> {
     if (projectId <= 0) throw new Error("Project ID must be greater than zero.");
     if (outputCount <= 0) throw new Error("Output count must be greater than zero.");
@@ -145,14 +173,14 @@ export class GmooClient {
       }
     }
     const request: LoadOutputCasesRequest = { outputCount, outputCases };
-    return this.post<Trial>(`projects/${projectId}/output-cases`, request);
+    return this.post<Trial>(`projects/${projectId}/output-cases`, request, signal);
   }
 
   // --- Objective Operations ---
 
-  async getObjective(objectiveId: number): Promise<Objective> {
+  async getObjective(objectiveId: number, signal?: AbortSignal): Promise<Objective> {
     if (objectiveId <= 0) throw new Error("Objective ID must be greater than zero.");
-    return this.get<Objective>(`objectives/${objectiveId}`);
+    return this.get<Objective>(`objectives/${objectiveId}`, signal);
   }
 
   async loadObjectives(
@@ -163,7 +191,8 @@ export class GmooClient {
     initialOutput: number[],
     desiredL1Norm: number = 0.0,
     minimumBounds?: number[],
-    maximumBounds?: number[]
+    maximumBounds?: number[],
+    signal?: AbortSignal
   ): Promise<Objective> {
     if (trialId <= 0) throw new Error("Trial ID must be greater than zero.");
     if (objectives.length !== objectiveTypes.length)
@@ -186,43 +215,44 @@ export class GmooClient {
       minimumBounds: minBounds,
       maximumBounds: maxBounds,
     };
-    return this.post<Objective>(`trials/${trialId}/objectives`, request);
+    return this.post<Objective>(`trials/${trialId}/objectives`, request, signal);
   }
 
   // --- Inverse Operations ---
 
-  async suggestInverse(objectiveId: number): Promise<Inverse> {
+  async suggestInverse(objectiveId: number, signal?: AbortSignal): Promise<Inverse> {
     if (objectiveId <= 0) throw new Error("Objective ID must be greater than zero.");
-    return this.post<Inverse>(`objectives/${objectiveId}/suggest-inverse`, {});
+    return this.post<Inverse>(`objectives/${objectiveId}/suggest-inverse`, {}, signal);
   }
 
-  async loadInverseOutput(inverseId: number, output: number[]): Promise<Inverse> {
+  async loadInverseOutput(inverseId: number, output: number[], signal?: AbortSignal): Promise<Inverse> {
     if (inverseId <= 0) throw new Error("Inverse ID must be greater than zero.");
     if (output.length === 0) throw new Error("Output list cannot be empty.");
     const request: LoadInverseOutputRequest = { output };
-    return this.post<Inverse>(`inverses/${inverseId}/load-output`, request);
+    return this.post<Inverse>(`inverses/${inverseId}/load-output`, request, signal);
   }
 
   // --- HTTP Helpers ---
 
-  private async get<T>(endpoint: string): Promise<T> {
-    return this.sendRequest<T>("GET", endpoint);
+  private async get<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
+    return this.sendRequest<T>("GET", endpoint, undefined, signal);
   }
 
-  private async post<T>(endpoint: string, data: unknown): Promise<T> {
-    return this.sendRequest<T>("POST", endpoint, data);
+  private async post<T>(endpoint: string, data: unknown, signal?: AbortSignal): Promise<T> {
+    return this.sendRequest<T>("POST", endpoint, data, signal);
   }
 
   private async sendRequest<T>(
     method: string,
     endpoint: string,
-    data?: unknown
+    data?: unknown,
+    signal?: AbortSignal
   ): Promise<T> {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        return await this.executeRequest<T>(method, endpoint, data);
+        return await this.executeRequest<T>(method, endpoint, data, signal);
       } catch (err) {
         lastError = err as Error;
         if (err instanceof GmooApiError && this.shouldRetry(err.status)) {
@@ -242,35 +272,56 @@ export class GmooClient {
   private async executeRequest<T>(
     method: string,
     endpoint: string,
-    data?: unknown
+    data?: unknown,
+    signal?: AbortSignal
   ): Promise<T> {
+    if (signal?.aborted) throw new GmooCancelledError();
+
     const url = this.baseUrl + endpoint;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       Accept: "application/json",
     };
 
-    const init: RequestInit = { method, headers };
+    // One controller drives the fetch; it fires on timeout or when the
+    // caller's signal aborts (AbortSignal.any isn't available in all hosts).
+    const controller = new AbortController();
+    const timeoutId =
+      this.timeoutMs > 0 ? setTimeout(() => controller.abort(), this.timeoutMs) : null;
+    const onCallerAbort = () => controller.abort();
+    signal?.addEventListener("abort", onCallerAbort);
+
+    const init: RequestInit = { method, headers, signal: controller.signal };
 
     if (data && method !== "GET") {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(data);
     }
 
-    const response = await fetch(url, init);
+    try {
+      const response = await fetch(url, init);
 
-    if (!response.ok) {
-      let apiError: GmooError | null = null;
-      try {
-        const body = await response.text();
-        try { apiError = JSON.parse(body); } catch { /* not JSON */ }
-      } catch {
-        // Couldn't read response body
+      if (!response.ok) {
+        let apiError: GmooError | null = null;
+        try {
+          const body = await response.text();
+          try { apiError = JSON.parse(body); } catch { /* not JSON */ }
+        } catch {
+          // Couldn't read response body
+        }
+        throw new GmooApiError(response.status, apiError);
       }
-      throw new GmooApiError(response.status, apiError);
-    }
 
-    return (await response.json()) as T;
+      return (await response.json()) as T;
+    } catch (err) {
+      if (err instanceof GmooApiError) throw err;
+      if (signal?.aborted) throw new GmooCancelledError();
+      if (controller.signal.aborted) throw new GmooTimeoutError(this.timeoutMs);
+      throw err;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", onCallerAbort);
+    }
   }
 
   private shouldRetry(status: number): boolean {

@@ -90,14 +90,18 @@ export async function loadWorkbookState(): Promise<WorkbookState> {
     const restored: Partial<WorkbookState> = {};
     let hasAny = false;
 
+    // getItemOrNullObject returns a fresh unloaded proxy on every call, so the
+    // loaded proxies must be kept and reused after sync — re-fetching them
+    // would read properties that were never populated.
+    const fallbackSettings = new Map<keyof WorkbookState, Excel.Setting>();
     for (const key of FALLBACK_KEYS) {
       const setting = settings.getItemOrNullObject(`${SETTINGS_KEY_PREFIX}${key}`);
-      setting.load("value");
+      setting.load("isNullObject, value");
+      fallbackSettings.set(key, setting);
     }
     await context.sync();
 
-    for (const key of FALLBACK_KEYS) {
-      const setting = settings.getItemOrNullObject(`${SETTINGS_KEY_PREFIX}${key}`);
+    for (const [key, setting] of fallbackSettings) {
       if (!setting.isNullObject && setting.value) {
         hasAny = true;
         const val = setting.value;
@@ -140,14 +144,15 @@ export async function clearWorkbookState(): Promise<void> {
     }
 
     const settings = context.workbook.settings;
+    const fallbackSettings: Excel.Setting[] = [];
     for (const key of FALLBACK_KEYS) {
       const setting = settings.getItemOrNullObject(`${SETTINGS_KEY_PREFIX}${key}`);
       setting.load("isNullObject");
+      fallbackSettings.push(setting);
     }
     await context.sync();
 
-    for (const key of FALLBACK_KEYS) {
-      const setting = settings.getItemOrNullObject(`${SETTINGS_KEY_PREFIX}${key}`);
+    for (const setting of fallbackSettings) {
       if (!setting.isNullObject) {
         setting.delete();
       }
