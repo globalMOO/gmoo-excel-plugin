@@ -288,13 +288,21 @@ export async function calculateAndWait(mode: CalcMode = "full"): Promise<void> {
     await context.sync();
   });
 
-  // Poll calculationState until done. NOTE: workbooks containing volatile
-  // functions (OFFSET/INDIRECT/CELL/NOW) or intentional circular references
-  // with iterative calc may NEVER report "done" - volatile cells re-dirty the
-  // moment a pass completes. The calculate+sync above has already been
-  // processed by the calc engine, and subsequent Office.js reads queue behind
-  // any in-flight calculation anyway, so on timeout we proceed with a warning
-  // instead of failing the evaluation.
+  // Wait only while Excel is ACTIVELY calculating; proceed once it is not.
+  //
+  // We must NOT wait for state === "done": workbooks containing volatile
+  // functions (INDIRECT/OFFSET/CELL/NOW/TODAY) or iterative circular
+  // references remain permanently "pending" after every recalc, because
+  // volatiles are always considered dirty. Waiting for "done" therefore
+  // stalls the entire RECALC_TIMEOUT (e.g. 30s) on EVERY case for such
+  // workbooks, even though the calculate+context.sync above already produced
+  // correct, current values (verified: a model that recalcs in ~5s reports
+  // "pending" indefinitely).
+  //
+  // "pending" = "volatiles would recompute if triggered", not "this recalc is
+  // unfinished". Only "calculating" means work is genuinely in progress, so we
+  // block on that alone. Host commands are serialized, so the subsequent
+  // output read cannot execute before this recalc completes regardless.
   const start = Date.now();
   while (Date.now() - start < RECALC_TIMEOUT) {
     const state = await Excel.run(async (context) => {
@@ -304,12 +312,12 @@ export async function calculateAndWait(mode: CalcMode = "full"): Promise<void> {
       return app.calculationState;
     });
 
-    if (state === Excel.CalculationState.done) return;
+    // Done or Pending -> values are current; only keep waiting while Calculating.
+    if (state !== Excel.CalculationState.calculating) return;
     await delay(RECALC_POLL_INTERVAL);
   }
   console.warn(
-    "calculationState did not report 'done' within timeout (volatile or " +
-      "iterative workbook); proceeding with read."
+    "Excel still reports 'calculating' after timeout; proceeding with read."
   );
 }
 
